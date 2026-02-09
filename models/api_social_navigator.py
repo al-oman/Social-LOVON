@@ -104,6 +104,11 @@ class SocialNavigator:
         "pred_history": 5,
         "pred_steps": 10,
         "pred_interval": 1,    # predict every frame
+        # --- ByteTrack tracker ---
+        "track_high_thresh": 0.5,   # confidence >= this → first association
+        "track_low_thresh": 0.1,    # confidence >= this → second association
+        "track_iou_thresh": 0.3,    # minimum IoU to accept a match
+        "track_max_lost": 30,       # frames before a lost track is removed
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -118,6 +123,7 @@ class SocialNavigator:
         # --- Tracked human registry ---
         self._tracked_humans = {}  # type: Dict[int, TrackedHuman]
         self._next_id = 0
+        self._byte_tracks = []     # type: List[dict]  # internal ByteTrack state
 
         # --- Trajectory predictor ---
         self._predictor = HumanTrajectoryPredictor(
@@ -299,34 +305,202 @@ class SocialNavigator:
         return [x_lateral, depth]
 
     # ================================================================== #
-    #  STAGE 3 -- Tracker (simple nearest-neighbor, placeholder)          #
+    #  STAGE 3 -- ByteTrack IoU tracker                                   #
     # ================================================================== #
 
     def _update_tracker(self, detections):
         # type: (List[dict]) -> None
         """
-        Minimal ID-assignment tracker (not ByteTrack yet).
+        ByteTrack IoU-based tracker for persistent multi-human tracking.
 
-        TODO: Replace with ByteTrack IoU-based tracker for robust
-              multi-human tracking with persistent IDs.
+        Algorithm (adapted from ByteTrack, Zhang et al. 2022):
+          1. Split detections into high-conf and low-conf groups.
+          2. First association: high-conf dets vs active tracks (IoU).
+          3. Second association: low-conf dets vs remaining active tracks.
+          4. Third association: remaining high-conf dets vs lost tracks
+             (re-identification).
+          5. Unmatched high-conf dets become new tracks.
+          6. Unmatched active tracks become lost; lost tracks exceeding
+             track_max_lost frames are removed.
         """
         now = time.time()
+        high_thresh = self.params["track_high_thresh"]
+        low_thresh = self.params["track_low_thresh"]
+        iou_thresh = self.params["track_iou_thresh"]
+        max_lost = self.params["track_max_lost"]
 
+        # --- Only track detections that have a bounding box ---
+        valid_dets = [(i, d) for i, d in enumerate(detections)
+                      if d.get("bbox") is not None]
+
+        # --- Split by confidence ---
+        high_dets = [(i, d) for i, d in valid_dets
+                     if d.get("confidence", 0.0) >= high_thresh]
+        low_dets = [(i, d) for i, d in valid_dets
+                    if low_thresh <= d.get("confidence", 0.0) < high_thresh]
+
+        # --- Partition existing tracks ---
+        active_tracks = [t for t in self._byte_tracks if t["state"] == "active"]
+        lost_tracks = [t for t in self._byte_tracks if t["state"] == "lost"]
+
+        # === FIRST ASSOCIATION: high-conf dets vs active tracks ===
+        matches_1, unmatch_det_1, unmatch_trk_1 = self._associate(
+            high_dets, active_tracks, iou_thresh,
+        )
+        for di, ti in matches_1:
+            self._apply_detection(active_tracks[ti], high_dets[di][1], now)
+
+        remaining_active = [active_tracks[i] for i in unmatch_trk_1]
+
+        # === SECOND ASSOCIATION: low-conf dets vs remaining active tracks ===
+        matches_2, _, unmatch_trk_2 = self._associate(
+            low_dets, remaining_active, iou_thresh,
+        )
+        for di, ti in matches_2:
+            self._apply_detection(remaining_active[ti], low_dets[di][1], now)
+
+        # Mark still-unmatched active tracks as lost
+        for i in unmatch_trk_2:
+            remaining_active[i]["state"] = "lost"
+            remaining_active[i]["frames_lost"] += 1
+
+        # === THIRD ASSOCIATION: remaining high-conf dets vs lost tracks ===
+        remaining_high = [high_dets[i] for i in unmatch_det_1]
+        matches_3, unmatch_new, unmatch_lost = self._associate(
+            remaining_high, lost_tracks, iou_thresh,
+        )
+        for di, ti in matches_3:
+            track = lost_tracks[ti]
+            self._apply_detection(track, remaining_high[di][1], now)
+            track["state"] = "active"
+            track["frames_lost"] = 0
+
+        # === NEW TRACKS from unmatched high-conf dets ===
+        for i in unmatch_new:
+            _, det_data = remaining_high[i]
+            new_track = {
+                "track_id": self._next_id,
+                "state": "active",
+                "frames_lost": 0,
+            }
+            self._next_id += 1
+            self._apply_detection(new_track, det_data, now)
+            self._byte_tracks.append(new_track)
+
+        # === Age unmatched lost tracks, prune expired ===
+        for i in unmatch_lost:
+            lost_tracks[i]["frames_lost"] += 1
+
+        self._byte_tracks = [
+            t for t in self._byte_tracks
+            if not (t["state"] == "lost" and t["frames_lost"] > max_lost)
+        ]
+
+        # === Build _tracked_humans from active tracks ===
         self._tracked_humans.clear()
-        for i, det in enumerate(detections):
-            tid = i  # placeholder -- no persistent IDs yet
-            human = TrackedHuman(track_id=tid)
-            human.bbox = det.get("bbox")
-            human.position_image = det.get("center_px")
-            human.keypoints = det.get("keypoints")
-            human.keypoints_conf = det.get("keypoints_conf")
-            human.confidence = det.get("confidence", 0.0)
-            human.distance_lidar = det.get("distance_lidar")
-            human.distance_mono = det.get("distance_mono")
-            human.distance = det.get("distance")
-            human.position_rf = det.get("position_rf")
-            human.last_seen = now
-            self._tracked_humans[tid] = human
+        for track in self._byte_tracks:
+            if track["state"] == "active":
+                tid = track["track_id"]
+                human = TrackedHuman(track_id=tid)
+                human.bbox = track.get("bbox")
+                human.position_image = track.get("center_px")
+                human.keypoints = track.get("keypoints")
+                human.keypoints_conf = track.get("keypoints_conf")
+                human.confidence = track.get("confidence", 0.0)
+                human.distance_lidar = track.get("distance_lidar")
+                human.distance_mono = track.get("distance_mono")
+                human.distance = track.get("distance")
+                human.position_rf = track.get("position_rf")
+                human.last_seen = track.get("last_seen", now)
+                self._tracked_humans[tid] = human
+
+        logger.debug(
+            "ByteTrack: %d active, %d lost, %d total tracks",
+            sum(1 for t in self._byte_tracks if t["state"] == "active"),
+            sum(1 for t in self._byte_tracks if t["state"] == "lost"),
+            len(self._byte_tracks),
+        )
+
+    # ---- ByteTrack helpers ------------------------------------------- #
+
+    def _associate(self, dets, tracks, iou_thresh):
+        # type: (list, list, float) -> Tuple[list, list, list]
+        """
+        Greedy IoU-based association between detections and tracks.
+
+        Args:
+            dets:       list of (original_index, det_dict) tuples
+            tracks:     list of track dicts (must have "bbox" key)
+            iou_thresh: minimum IoU to accept a match
+
+        Returns:
+            matches:          list of (det_list_idx, track_list_idx) pairs
+            unmatched_dets:   list of det list indices not matched
+            unmatched_tracks: list of track list indices not matched
+        """
+        if not dets or not tracks:
+            return [], list(range(len(dets))), list(range(len(tracks)))
+
+        det_boxes = np.array([d.get("bbox") for _, d in dets], dtype=np.float64)
+        trk_boxes = np.array([t.get("bbox") for t in tracks], dtype=np.float64)
+
+        if det_boxes.ndim != 2 or trk_boxes.ndim != 2:
+            return [], list(range(len(dets))), list(range(len(tracks)))
+
+        iou_matrix = self._compute_iou_matrix(det_boxes, trk_boxes)
+
+        # Greedy: pick highest IoU first, mark both sides as used
+        rows, cols = np.where(iou_matrix >= iou_thresh)
+        if len(rows) == 0:
+            return [], list(range(len(dets))), list(range(len(tracks)))
+
+        ious = iou_matrix[rows, cols]
+        order = np.argsort(-ious)
+
+        matches = []
+        used_dets = set()
+        used_tracks = set()
+        for idx in order:
+            d, t = int(rows[idx]), int(cols[idx])
+            if d not in used_dets and t not in used_tracks:
+                matches.append((d, t))
+                used_dets.add(d)
+                used_tracks.add(t)
+
+        unmatched_dets = [i for i in range(len(dets)) if i not in used_dets]
+        unmatched_tracks = [i for i in range(len(tracks)) if i not in used_tracks]
+        return matches, unmatched_dets, unmatched_tracks
+
+    @staticmethod
+    def _compute_iou_matrix(boxes_a, boxes_b):
+        # type: (np.ndarray, np.ndarray) -> np.ndarray
+        """Pairwise IoU between (N,4) and (M,4) boxes in [x1,y1,x2,y2] format."""
+        x1 = np.maximum(boxes_a[:, 0:1], boxes_b[:, 0:1].T)
+        y1 = np.maximum(boxes_a[:, 1:2], boxes_b[:, 1:2].T)
+        x2 = np.minimum(boxes_a[:, 2:3], boxes_b[:, 2:3].T)
+        y2 = np.minimum(boxes_a[:, 3:4], boxes_b[:, 3:4].T)
+
+        inter = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+        area_a = (boxes_a[:, 2] - boxes_a[:, 0]) * (boxes_a[:, 3] - boxes_a[:, 1])
+        area_b = (boxes_b[:, 2] - boxes_b[:, 0]) * (boxes_b[:, 3] - boxes_b[:, 1])
+        union = area_a[:, None] + area_b[None, :] - inter
+        return inter / np.maximum(union, 1e-6)
+
+    @staticmethod
+    def _apply_detection(track, det, timestamp):
+        """Update a track dict with data from a new detection."""
+        track["bbox"] = det.get("bbox")
+        track["center_px"] = det.get("center_px")
+        track["keypoints"] = det.get("keypoints")
+        track["keypoints_conf"] = det.get("keypoints_conf")
+        track["confidence"] = det.get("confidence", 0.0)
+        track["distance_lidar"] = det.get("distance_lidar")
+        track["distance_mono"] = det.get("distance_mono")
+        track["distance"] = det.get("distance")
+        track["position_rf"] = det.get("position_rf")
+        track["last_seen"] = timestamp
+        track["state"] = "active"
+        track["frames_lost"] = 0
 
     # ================================================================== #
     #  STAGE 4 -- Trajectory prediction                                   #
@@ -346,10 +520,8 @@ class SocialNavigator:
             4. Derive velocity estimate from last two history points.
             5. Prune stale agents from predictor history.
 
-        Note: The predictor expects persistent track IDs for meaningful
-        multi-frame history. With the current placeholder tracker
-        (sequential IDs, no re-identification), predictions will be
-        limited until ByteTrack is integrated.
+        Track IDs are persistent across frames (provided by ByteTrack),
+        enabling meaningful multi-frame history and velocity estimation.
         """
         # Feed current observations into predictor
         for human in self._tracked_humans.values():

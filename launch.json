@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Python with CLI args",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/deploy/deploy.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--simulation_mode",
+        "--socialnav_enabled"
+      ]
+    }
+  ]
+}

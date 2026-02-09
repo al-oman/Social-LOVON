@@ -788,8 +788,8 @@ class VisualLanguageController:
                         if h and h.distance is not None:
                             dist_str = f" {h.distance:.1f}m"
                             if h.position_rf is not None:
-                                dist_str += f" [{h.position_rf[0]:+.1f}, {h.position_rf[1]:.1f}]"
-                    label = f"Person: {confidence:.2f}{dist_str}"
+                                dist_str += f"[x_lat, depth]: [{h.position_rf[0]:+.1f}, {h.position_rf[1]:.1f}]"
+                    label = f"Person (confidence, distance): {confidence:.2f}{dist_str}"
 
                     (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                     cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (255, 0, 0), -1)
