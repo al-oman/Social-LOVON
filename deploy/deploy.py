@@ -267,7 +267,8 @@ class VisualLanguageController:
                  show_arrowed=False,
                  blur_threshold=10.0,
                  lengthen_filter=3,
-                 simulation_mode=False):
+                 simulation_mode=False, 
+                 socialnav_enabled=False):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
@@ -290,6 +291,7 @@ class VisualLanguageController:
         self.blur_threshold = blur_threshold  # Threshold for blur detection
         self.lengthen_filter = lengthen_filter  # Number of historical detection results to keep
         self.simulation_mode = simulation_mode  # Whether to run in simulation mode
+        self.socialnav_enabled = socialnav_enabled  # Whether to enable social navigation adjustments
         self.button_update_inst = False
 
         # Initialize RealSense camera if selected
@@ -344,7 +346,7 @@ class VisualLanguageController:
         self.motion_control_thread = MotionControlThread(self)
 
         # Load social navigaton function
-        self.social_nav = SocialNavigator(enabled=False)
+        self.social_nav = SocialNavigator(enabled=self.socialnav_enabled)
 
         # Initialize UI
         self.root = Tk()
@@ -779,8 +781,16 @@ class VisualLanguageController:
                     x1, y1, x2, y2 = self.pose_state["pose_boxes"][idx]
                     cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue border
                     
-                    # Draw label
-                    label = f"Person: {confidence:.2f}"
+                    # Draw label with distance from social nav
+                    dist_str = ""
+                    if hasattr(self, 'social_nav') and self.social_nav.enabled:
+                        h = self.social_nav._tracked_humans.get(idx)
+                        if h and h.distance is not None:
+                            dist_str = f" {h.distance:.1f}m"
+                            if h.position_rf is not None:
+                                dist_str += f" [{h.position_rf[0]:+.1f}, {h.position_rf[1]:.1f}]"
+                    label = f"Person: {confidence:.2f}{dist_str}"
+
                     (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                     cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (255, 0, 0), -1)
                     cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -917,12 +927,17 @@ if __name__ == "__main__":
                       help='Blur detection threshold')
     parser.add_argument('--lengthen_filter', type=int, default=1,
                       help='Number of historical detection results to keep')
+    
+    # Added parameters
     parser.add_argument('--simulation_mode', action='store_true', default=False,
                   help='Run in simulation mode (webcam + print commands)')
+    parser.add_argument('--socialnav_enabled', action='store_true', default=False,
+                  help='Enable social navigation adjustments')
     
     args = parser.parse_args()
 
     # Initialize and run controller
+    print("hello!!!!", args.socialnav_enabled)
     controller = VisualLanguageController(
         yolo_model_dir=args.yolo_model_dir,
         yolo_pose_model_dir=args.yolo_pose_model_dir,
@@ -936,7 +951,8 @@ if __name__ == "__main__":
         show_arrowed=args.show_arrowed,
         blur_threshold=args.threshold,
         lengthen_filter=args.lengthen_filter,
-        simulation_mode=args.simulation_mode
+        simulation_mode=args.simulation_mode,
+        socialnav_enabled=args.socialnav_enabled
     )
     controller.run()
     print("Program terminated.")
