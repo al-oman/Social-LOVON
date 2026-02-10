@@ -148,6 +148,7 @@ class SocialNavigator:
         # --- Motion vectors (for BEV drawing) ---
         self._motion_original = None
         self._motion_modulated = None
+        self._lidar_ranges = None
 
         # --- Diagnostics ---
         self.diag = {
@@ -191,6 +192,7 @@ class SocialNavigator:
             return motion_vector
 
         self._frame_count += 1
+        self._lidar_ranges = lidar_ranges
 
         # 1. Parse detections from pose_state
         detections = self._parse_pose_state(pose_state)
@@ -785,12 +787,14 @@ class SocialNavigator:
         """Draw bird's-eye-view mini-map on bottom-right of image."""
         import cv2 as _cv2
 
-        if not self._tracked_humans:
+        has_lidar = self._lidar_ranges is not None
+        has_humans = bool(self._tracked_humans)
+        if not has_lidar and not has_humans:
             return image
 
-        sz = 200
+        sz = 600
         margin = 10
-        pad = 20
+        pad = 60
         d_max = self.params["d_max"]
         scale = (sz - 2 * pad) / d_max   # px per meter
 
@@ -807,15 +811,66 @@ class SocialNavigator:
         ).astype(np.uint8)
         _cv2.rectangle(image, (x0, y0), (x0 + sz, y0 + sz), (255, 255, 255), 1)
 
-        # Robot marker at bottom-center
+        # Robot at bottom-center
         rcx = x0 + sz // 2
         rcy = y0 + sz - pad
+
+        # Range-ring semicircles (forward half)
+        for r_m in np.arange(0.5, d_max + 0.01, 0.5):
+            r_px = int(r_m * scale)
+            _cv2.ellipse(image, (rcx, rcy), (r_px, r_px), 0, 180, 360,
+                         (80, 80, 80), 1, _cv2.LINE_AA)
+            if r_m % 1.0 < 0.01:  # label at 1 m, 2 m, …
+                _cv2.putText(image, "{}m".format(int(r_m)),
+                             (rcx + 3, rcy - r_px + 5),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
+
+        # --- LiDAR point cloud ---
+        if has_lidar:
+            lx = self._lidar_ranges.get("x")
+            ly = self._lidar_ranges.get("y")
+            lz = self._lidar_ranges.get("z")
+            if lx is not None and ly is not None and lz is not None:
+                lx = np.asarray(lx, dtype=np.float64)
+                ly = np.asarray(ly, dtype=np.float64)
+                lz = np.asarray(lz, dtype=np.float64)
+                if lx.size > 0:
+                    # Filter: forward, within d_max, within height range
+                    mask = lx > 0
+                    dist = np.sqrt(lx ** 2 + ly ** 2)
+                    mask &= dist <= d_max
+                    mask &= ((lz >= self.params["lidar_z_min"])
+                             & (lz <= self.params["lidar_z_max"]))
+
+                    # Robot frame → BEV pixel (x=forward, y=left)
+                    px_arr = (rcx + (-ly[mask]) * scale).astype(np.int32)
+                    py_arr = (rcy - lx[mask] * scale).astype(np.int32)
+
+                    # Clip to minimap bounds
+                    in_bounds = ((px_arr >= x0) & (px_arr <= x0 + sz)
+                                 & (py_arr >= y0) & (py_arr <= y0 + sz))
+                    px_arr = px_arr[in_bounds]
+                    py_arr = py_arr[in_bounds]
+
+                    # Subsample if needed for draw performance
+                    n_pts = len(px_arr)
+                    if n_pts > 1500:
+                        stride = n_pts // 1500
+                        px_arr = px_arr[::stride]
+                        py_arr = py_arr[::stride]
+
+                    for i in range(len(px_arr)):
+                        _cv2.circle(image,
+                                    (int(px_arr[i]), int(py_arr[i])),
+                                    2, (160, 140, 80), -1)  # muted teal
+
+        # Robot marker (on top of lidar points)
         _cv2.drawMarker(image, (rcx, rcy), (0, 255, 0),
-                        _cv2.MARKER_TRIANGLE_UP, 10, 2)
+                        _cv2.MARKER_TRIANGLE_UP, 24, 2)
 
         # Label
-        _cv2.putText(image, "Bird's Eye View", (x0 + 5, y0 + 15),
-                     _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        _cv2.putText(image, "Bird's Eye View", (x0 + 10, y0 + 25),
+                     _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
         # Robot motion-vector curves
         horizon = self.params["horizon_s"]
@@ -838,7 +893,7 @@ class SocialNavigator:
                 py = int(rcy - y * scale)
                 if not (x0 <= px <= x0 + sz and y0 <= py <= y0 + sz):
                     break
-                _cv2.line(image, prev, (px, py), color, 1, _cv2.LINE_AA)
+                _cv2.line(image, prev, (px, py), color, 2, _cv2.LINE_AA)
                 prev = (px, py)
 
         for human in self._tracked_humans.values():
@@ -853,9 +908,9 @@ class SocialNavigator:
                 continue
 
             # Human dot + ID label
-            _cv2.circle(image, (px, py), 4, (0, 0, 255), -1)
-            _cv2.putText(image, str(human.track_id), (px + 6, py - 2),
-                         _cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+            _cv2.circle(image, (px, py), 8, (0, 0, 255), -1)
+            _cv2.putText(image, str(human.track_id), (px + 10, py - 4),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
             # Predicted trajectory dots
             if human.predicted_path:
@@ -863,6 +918,6 @@ class SocialNavigator:
                     tx = int(rcx + pt[0] * scale)
                     ty = int(rcy - pt[1] * scale)
                     if x0 <= tx <= x0 + sz and y0 <= ty <= y0 + sz:
-                        _cv2.circle(image, (tx, ty), 2, (0, 165, 255), -1)
+                        _cv2.circle(image, (tx, ty), 4, (0, 165, 255), -1)
 
         return image
