@@ -656,6 +656,72 @@ class SocialNavigator:
                 prox_cost, traj_cost, self.is_yielding,
             )
 
+    # ================================================================== #
+    #  BEV mini-map overlay                                                #
+    # ================================================================== #
+
+    def draw_bev(self, image):
+        """Draw bird's-eye-view mini-map on bottom-right of image."""
+        import cv2 as _cv2
+
+        if not self._tracked_humans:
+            return image
+
+        sz = 200
+        margin = 10
+        pad = 20
+        d_max = self.params["d_max"]
+        scale = (sz - 2 * pad) / d_max   # px per meter
+
+        h, w = image.shape[:2]
+        if w < sz + margin or h < sz + margin:
+            return image
+
+        x0 = w - sz - margin
+        y0 = h - sz - margin
+
+        # Darken background (ROI only)
+        image[y0:y0+sz, x0:x0+sz] = (
+            image[y0:y0+sz, x0:x0+sz].astype(np.float32) * 0.3
+        ).astype(np.uint8)
+        _cv2.rectangle(image, (x0, y0), (x0 + sz, y0 + sz), (255, 255, 255), 1)
+
+        # Robot marker at bottom-center
+        rcx = x0 + sz // 2
+        rcy = y0 + sz - pad
+        _cv2.drawMarker(image, (rcx, rcy), (0, 255, 0),
+                        _cv2.MARKER_TRIANGLE_UP, 10, 2)
+
+        # Label
+        _cv2.putText(image, "BEV", (x0 + 5, y0 + 15),
+                     _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+        for human in self._tracked_humans.values():
+            if human.position_rf is None:
+                continue
+
+            xl, dp = human.position_rf
+            px = int(rcx + xl * scale)
+            py = int(rcy - dp * scale)
+
+            if not (x0 <= px <= x0 + sz and y0 <= py <= y0 + sz):
+                continue
+
+            # Human dot + ID label
+            _cv2.circle(image, (px, py), 4, (0, 0, 255), -1)
+            _cv2.putText(image, str(human.track_id), (px + 6, py - 2),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
+
+            # Predicted trajectory dots
+            if human.predicted_path:
+                for pt in human.predicted_path:
+                    tx = int(rcx + pt[0] * scale)
+                    ty = int(rcy - pt[1] * scale)
+                    if x0 <= tx <= x0 + sz and y0 <= ty <= y0 + sz:
+                        _cv2.circle(image, (tx, ty), 2, (0, 165, 255), -1)
+
+        return image
+
 
 # class SocialNavigator:
 #     """

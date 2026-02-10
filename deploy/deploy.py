@@ -811,6 +811,10 @@ class VisualLanguageController:
                         cv2.line(image, pt1, pt2, (0, 255, 0), 2)  # Green skeleton lines
 
 
+        # Draw BEV mini-map
+        if hasattr(self, 'social_nav') and self.social_nav.enabled:
+            image = self.social_nav.draw_bev(image)
+
         # Draw status information with black background
         texts = [
             f"Mission Instruction 1: {self.mission_instruction_1}",
