@@ -117,12 +117,12 @@ class SocialNavigator:
         self.enabled = enabled
         self.params = {**self.DEFAULT_PARAMS, **kwargs}
 
-        # --- Derived camera intrinsics ---
+        # --- Camera parameters ---
         half_fov = math.radians(self.params["fov_deg"] / 2.0)
         self._fx = (self.params["image_width"] / 2.0) / math.tan(half_fov)
         self._cx = self.params["image_width"] / 2.0
 
-        # --- Tracked human registry ---
+        # --- Tracked human data for ByteTrack ---
         self._tracked_humans = {}  # type: Dict[int, TrackedHuman]
         self._next_id = 0
         self._byte_tracks = []     # type: List[dict]  # internal ByteTrack state
@@ -135,7 +135,7 @@ class SocialNavigator:
         )
         self._frame_count = 0
 
-        # --- Action shield state ---
+        # --- Action shield info ---
         self.shield_active = False
         self.safety_score = 1.0      # 1.0 = fully safe, 0.0 = imminent collision
 

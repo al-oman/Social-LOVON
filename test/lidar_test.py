@@ -74,6 +74,13 @@ RANGE_MIN = 2.0
 RANGE_MAX = 50.0
 POINT_RADIUS = 1
 
+# --- Tunable filtering parameters ---
+Z_MIN = -0.5            # meters — drop points below this (ground plane)
+Z_MAX = 2.0             # meters — drop points above this (ceiling / noise)
+DIST_MAX = 30.0         # meters — drop points farther than this
+ORIGIN_THRESH = 0.01    # meters — drop points within this radius of (0,0,0)
+_first_frame_printed = False
+
 
 def world_to_px(x, y, range_m):
     """Convert world (x forward, y left) to pixel coords (center = robot)."""
@@ -113,13 +120,33 @@ def render(cloud, n_points, freq, range_m):
     cv2.line(canvas, (0, cy), (CANVAS_SIZE, cy), (50, 50, 50), 1)
 
     # Draw points
+    n_drawn = 0
     if cloud is not None and 'x' in cloud and 'y' in cloud:
+        global _first_frame_printed
         x = cloud['x']
         y = cloud['y']
         z = cloud.get('z', np.zeros_like(x))
 
-        # Filter to visible range
-        mask = (np.abs(x) < range_m) & (np.abs(y) < range_m)
+        # Print raw data stats once so you can tune the filter params
+        if not _first_frame_printed:
+            _first_frame_printed = True
+            print(f"[DEBUG] raw points: {len(x)}")
+            print(f"[DEBUG] x range: [{np.nanmin(x):.2f}, {np.nanmax(x):.2f}]")
+            print(f"[DEBUG] y range: [{np.nanmin(y):.2f}, {np.nanmax(y):.2f}]")
+            print(f"[DEBUG] z range: [{np.nanmin(z):.2f}, {np.nanmax(z):.2f}]")
+            dist = np.sqrt(x**2 + y**2 + z**2)
+            print(f"[DEBUG] dist range: [{np.nanmin(dist):.2f}, {np.nanmax(dist):.2f}]")
+            print(f"[DEBUG] fields: {list(cloud.keys())}")
+
+        # --- Filter invalid points ---
+        finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        dist_sq = x**2 + y**2 + z**2
+        not_origin = dist_sq > (ORIGIN_THRESH ** 2)
+        not_far = dist_sq < (DIST_MAX ** 2)
+        z_ok = (z >= Z_MIN) & (z <= Z_MAX)
+        in_view = (np.abs(x) < range_m) & (np.abs(y) < range_m)
+
+        mask = finite & not_origin & not_far & z_ok & in_view
         x, y, z = x[mask], y[mask], z[mask]
 
         if len(x) > 0:
@@ -128,13 +155,13 @@ def render(cloud, n_points, freq, range_m):
                 (CANVAS_SIZE / 2.0 - y * scale).astype(int),
                 (CANVAS_SIZE / 2.0 - x * scale).astype(int),
             ])
-            # Clip to canvas
-            valid = (
+            on_canvas = (
                 (pts_px[:, 0] >= 0) & (pts_px[:, 0] < CANVAS_SIZE) &
                 (pts_px[:, 1] >= 0) & (pts_px[:, 1] < CANVAS_SIZE)
             )
-            for px, py, col in zip(pts_px[valid, 0], pts_px[valid, 1], colors[valid]):
+            for px, py, col in zip(pts_px[on_canvas, 0], pts_px[on_canvas, 1], colors[on_canvas]):
                 canvas[py, px] = col
+            n_drawn = int(on_canvas.sum())
 
     # Robot marker (green triangle)
     tri = np.array([
@@ -146,9 +173,10 @@ def render(cloud, n_points, freq, range_m):
 
     # HUD
     hud_lines = [
-        f"Points: {n_points}",
+        f"Points: {n_drawn} / {n_points} raw",
         f"Freq: {freq:.1f} Hz",
         f"Range: {range_m:.0f} m",
+        f"Z filter: [{Z_MIN}, {Z_MAX}]  Dist max: {DIST_MAX}",
         "Controls: +/- zoom, q quit",
     ]
     for i, line in enumerate(hud_lines):
