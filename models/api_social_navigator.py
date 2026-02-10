@@ -111,6 +111,12 @@ class SocialNavigator:
         "track_low_thresh": 0.1,    # confidence >= this → second association
         "track_iou_thresh": 0.3,    # minimum IoU to accept a match
         "track_max_lost": 30,       # frames before a lost track is removed
+        # --- LiDAR depth estimation ---
+        "use_lidar_depth": False,      # True = use LiDAR for depth, False = monocular only
+        "lidar_z_min": -1.0,          # meters, min Z relative to sensor (below sensor)
+        "lidar_z_max": 1.0,           # meters, max Z relative to sensor (above sensor)
+        "lidar_angle_margin_deg": 2.0, # degrees, angular padding on bbox edges
+        "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -270,9 +276,60 @@ class SocialNavigator:
 
     def _estimate_distance_lidar(self, det, lidar_ranges):
         # type: (dict, ...) -> Optional[float]
+        """Estimate distance to a detected person using LiDAR point cloud.
+
+        Projects the person's bounding box into angular space, finds LiDAR
+        points within that cone, and returns the median horizontal distance.
+        """
+        if not self.params["use_lidar_depth"]:
+            return None
         if lidar_ranges is None:
             return None
-        return None
+
+        bbox = det.get("bbox")
+        if bbox is None:
+            return None
+
+        x1_px, _, x2_px, _ = bbox
+
+        # Convert bbox left/right pixel edges to horizontal angles (radians)
+        theta_left = math.atan((x1_px - self._cx) / self._fx)
+        theta_right = math.atan((x2_px - self._cx) / self._fx)
+        margin = math.radians(self.params["lidar_angle_margin_deg"])
+        theta_left -= margin
+        theta_right += margin
+
+        # Extract LiDAR point arrays
+        lx = lidar_ranges.get("x")
+        ly = lidar_ranges.get("y")
+        lz = lidar_ranges.get("z")
+        if lx is None or ly is None or lz is None:
+            return None
+
+        lx = np.asarray(lx, dtype=np.float64)
+        ly = np.asarray(ly, dtype=np.float64)
+        lz = np.asarray(lz, dtype=np.float64)
+
+        if lx.size == 0:
+            return None
+
+        # Filter: only points in front of the robot (x > 0)
+        mask = lx > 0
+
+        # Filter: human-height range (z relative to sensor)
+        mask &= (lz >= self.params["lidar_z_min"]) & (lz <= self.params["lidar_z_max"])
+
+        # Compute camera-convention angle for each point
+        # Robot frame: x=forward, y=left; camera: positive angle = right
+        theta = np.arctan2(-ly, lx)
+        mask &= (theta >= theta_left) & (theta <= theta_right)
+
+        if np.count_nonzero(mask) < self.params["lidar_min_points"]:
+            return None
+
+        # Horizontal distance (ignore z)
+        dist = np.sqrt(lx[mask] ** 2 + ly[mask] ** 2)
+        return float(np.median(dist))
 
     def _estimate_distance_mono(self, det):
         # type: (dict) -> Optional[float]
