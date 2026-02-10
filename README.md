@@ -9,7 +9,7 @@
 - [ ] Simulation Environment
 
 ## Installation
-
+Prepare the environment and install the project dependencies. 
 ```bash
 # 1. Create a virtual environment
 conda create -n lovon_env python=3.8 -y
@@ -25,7 +25,7 @@ pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 torchaudio==0.13.1 --e
 # 3. Install other dependencies
 pip install -r requirements.txt
 ```
-
+Install the Unitree Python SDK.
 ```bash
 # outside of Social-LOVON project folder
 git clone https://github.com/unitreerobotics/unitree_sdk2_python.git
