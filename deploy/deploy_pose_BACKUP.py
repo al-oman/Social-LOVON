@@ -24,6 +24,8 @@ from ultralytics import YOLO
 
 from models.api_object_extraction import SequenceToSequenceClassAPI
 from models.api_language2mostion import MotionPredictor
+from models.api_social_navigator import SocialNavigator
+
 
 from tkinter import Tk, Entry, Button, Label, Frame
 from PIL import Image, ImageTk
@@ -43,6 +45,7 @@ class ImageGetterThread(threading.Thread):
         self.controller = controller
         self.running = True
         self.image_queue = queue.Queue(maxsize=1)  # Keep only the latest frame
+        self.pose_image_queue = queue.Queue(maxsize=1)  # Separate queue for pose processing if needed
         self.freq_start = time.time()
         self.freq_count = 0
 
@@ -71,13 +74,24 @@ class ImageGetterThread(threading.Thread):
                             current_image, threshold=self.controller.blur_threshold
                         )
                         if not is_blur:
-                            # Only put clear images into the queue
                             self.image_queue.put(current_image)
+                            # Also feed pose queue
+                            if not self.pose_image_queue.empty():
+                                try:
+                                    self.pose_image_queue.get_nowait()
+                                except queue.Empty:
+                                    pass
+                            self.pose_image_queue.put(current_image.copy())
                             self.last_image = current_image
                         else:
-                            # Discard blurry image and use the last clear one if available
                             if hasattr(self, 'last_image'):
                                 self.image_queue.put(self.last_image)
+                                if not self.pose_image_queue.empty():
+                                    try:
+                                        self.pose_image_queue.get_nowait()
+                                    except queue.Empty:
+                                        pass
+                                self.pose_image_queue.put(self.last_image.copy())
                             else:
                                 print("No clear image available to use as fallback.")
 
@@ -165,7 +179,7 @@ class YoloPoseProcessingThread(threading.Thread):
         super().__init__()
         self.controller = controller
         self.running = True
-        self.image_queue = controller.image_getter_thread.image_queue
+        self.image_queue = controller.image_getter_thread.pose_image_queue
         self.result_queue = queue.Queue()
         self.freq_start = time.time()
         self.freq_count = 0
@@ -253,7 +267,8 @@ class VisualLanguageController:
                  show_arrowed=False,
                  blur_threshold=10.0,
                  lengthen_filter=3,
-                 simulation_mode=False):
+                 simulation_mode=False, 
+                 socialnav_enabled=False):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
@@ -276,6 +291,7 @@ class VisualLanguageController:
         self.blur_threshold = blur_threshold  # Threshold for blur detection
         self.lengthen_filter = lengthen_filter  # Number of historical detection results to keep
         self.simulation_mode = simulation_mode  # Whether to run in simulation mode
+        self.socialnav_enabled = socialnav_enabled  # Whether to enable social navigation adjustments
         self.button_update_inst = False
 
         # Initialize RealSense camera if selected
@@ -328,6 +344,9 @@ class VisualLanguageController:
         self.yolo_processing_thread = YoloProcessingThread(self)
         self.yolo_pose_processing_thread = YoloPoseProcessingThread(self)
         self.motion_control_thread = MotionControlThread(self)
+
+        # Load social navigaton function
+        self.social_nav = SocialNavigator(enabled=self.socialnav_enabled)
 
         # Initialize UI
         self.root = Tk()
@@ -694,6 +713,17 @@ class VisualLanguageController:
         self.state["search_state_in"] = prediction["search_state"]
         self.motion_vector = prediction["motion_vector"]
 
+        #-----------------------------------------------------------
+        # Addition of Social Nav element! Adjusts the output of L2MM motion vector
+        #-----------------------------------------------------------
+
+        self.motion_vector = self.social_nav.step(
+            motion_vector=self.motion_vector,
+            pose_state=self.pose_state,
+            mission_state=self.state["mission_state_in"],
+            lidar_ranges=None,  # TODO: wire Go2 lidar
+        )
+
     def _control_robot(self):
         """Send Motion Commands to Robot"""
         if hasattr(self, 'motion_vector'):
@@ -703,7 +733,6 @@ class VisualLanguageController:
             else:
                 self.sport_client.Move(v_x, v_y, w_z)
             
-
     def _show_results(self, image):
         """Draw Detection Results and Information on Image"""
         # Draw bounding box if enabled and object detected
@@ -752,8 +781,16 @@ class VisualLanguageController:
                     x1, y1, x2, y2 = self.pose_state["pose_boxes"][idx]
                     cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue border
                     
-                    # Draw label
-                    label = f"Person: {confidence:.2f}"
+                    # Draw label with distance from social nav
+                    dist_str = ""
+                    if hasattr(self, 'social_nav') and self.social_nav.enabled:
+                        h = self.social_nav._tracked_humans.get(idx)
+                        if h and h.distance is not None:
+                            dist_str = f" {h.distance:.1f}m"
+                            if h.position_rf is not None:
+                                dist_str += f"[x_lat, depth]: [{h.position_rf[0]:+.1f}, {h.position_rf[1]:.1f}]"
+                    label = f"Person (confidence, distance): {confidence:.2f}{dist_str}"
+
                     (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                     cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (255, 0, 0), -1)
                     cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -773,6 +810,10 @@ class VisualLanguageController:
                         pt2 = tuple(map(int, keypoints[pt2_idx]))
                         cv2.line(image, pt1, pt2, (0, 255, 0), 2)  # Green skeleton lines
 
+
+        # Draw BEV mini-map
+        if hasattr(self, 'social_nav') and self.social_nav.enabled:
+            image = self.social_nav.draw_bev(image)
 
         # Draw status information with black background
         texts = [
@@ -890,12 +931,17 @@ if __name__ == "__main__":
                       help='Blur detection threshold')
     parser.add_argument('--lengthen_filter', type=int, default=1,
                       help='Number of historical detection results to keep')
+    
+    # Added parameters
     parser.add_argument('--simulation_mode', action='store_true', default=False,
                   help='Run in simulation mode (webcam + print commands)')
+    parser.add_argument('--socialnav_enabled', action='store_true', default=False,
+                  help='Enable social navigation adjustments')
     
     args = parser.parse_args()
 
     # Initialize and run controller
+    print("hello!!!!", args.socialnav_enabled)
     controller = VisualLanguageController(
         yolo_model_dir=args.yolo_model_dir,
         yolo_pose_model_dir=args.yolo_pose_model_dir,
@@ -909,7 +955,8 @@ if __name__ == "__main__":
         show_arrowed=args.show_arrowed,
         blur_threshold=args.threshold,
         lengthen_filter=args.lengthen_filter,
-        simulation_mode=args.simulation_mode
+        simulation_mode=args.simulation_mode,
+        socialnav_enabled=args.socialnav_enabled
     )
     controller.run()
     print("Program terminated.")

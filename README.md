@@ -36,7 +36,7 @@ pip install -e .
 ## Usage
 
 ```bash
-python deploy/deploy.py --simulation_mode
+python deploy/deploy.py --simulation_mode --socialnav_enabled
 ```
 
 

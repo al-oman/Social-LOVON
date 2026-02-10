@@ -346,7 +346,8 @@ class VisualLanguageController:
         self.motion_control_thread = MotionControlThread(self)
 
         # Load social navigaton function
-        self.social_nav = SocialNavigator(enabled=self.socialnav_enabled)
+        self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
+                                          image_width=args.image_width)
 
         # Initialize UI
         self.root = Tk()
@@ -811,7 +812,7 @@ class VisualLanguageController:
                         cv2.line(image, pt1, pt2, (0, 255, 0), 2)  # Green skeleton lines
 
 
-        # Draw BEV mini-map
+        # Draw Birds-eye view mini-map
         if hasattr(self, 'social_nav') and self.social_nav.enabled:
             image = self.social_nav.draw_bev(image)
 
@@ -937,7 +938,8 @@ if __name__ == "__main__":
                   help='Run in simulation mode (webcam + print commands)')
     parser.add_argument('--socialnav_enabled', action='store_true', default=False,
                   help='Enable social navigation adjustments')
-    
+    parser.add_argument('--image_width', type=int, default=640,
+                      help='Width of input images')
     args = parser.parse_args()
 
     # Initialize and run controller
