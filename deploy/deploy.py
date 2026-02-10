@@ -12,7 +12,9 @@ import threading
 import queue
 import argparse
 from ultralytics import YOLO
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+import struct
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
 from unitree_sdk2py.go2.video.video_client import VideoClient as Go2VideoClient
 from unitree_sdk2py.go2.sport.sport_client import SportClient as Go2SportClient
 from unitree_sdk2py.h1.loco.h1_loco_client import LocoClient as H1SportClient
@@ -34,6 +36,74 @@ import logging
 logging.getLogger('ultralytics').setLevel(logging.ERROR)
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
+
+DTYPE_TO_STRUCT = {
+    1: 'b', 2: 'B', 3: 'h', 4: 'H',
+    5: 'i', 6: 'I', 7: 'f', 8: 'd',
+}
+
+def pointcloud2_to_array(msg: PointCloud2_):
+    """Parse a PointCloud2_ message into a dict of numpy arrays."""
+    data = bytearray(msg.data)
+    n_points = msg.width * msg.height
+    result = {}
+    for field in msg.fields:
+        fmt = DTYPE_TO_STRUCT[field.datatype]
+        size = struct.calcsize(fmt)
+        values = []
+        for i in range(n_points):
+            offset = i * msg.point_step + field.offset
+            values.append(struct.unpack_from(fmt, data, offset)[0])
+        result[field.name] = np.array(values)
+    return result
+
+
+class LiDARGetterThread(threading.Thread):
+    """LiDAR Point Cloud Acquisition Thread"""
+
+    def __init__(self, controller):
+        super().__init__()
+        self.controller = controller
+        self.running = True
+        self.lidar_lock = threading.Lock()
+        self.latest_cloud = None
+        self.freq_start = time.time()
+        self.freq_count = 0
+
+    def run(self):
+        sub = ChannelSubscriber('rt/utlidar/cloud', PointCloud2_)
+        sub.Init(handler=self._on_pointcloud, queueLen=10)
+        while self.running:
+            time.sleep(0.5)
+
+    def _on_pointcloud(self, msg: PointCloud2_):
+        try:
+            cloud = pointcloud2_to_array(msg)
+            with self.lidar_lock:
+                self.latest_cloud = cloud
+
+            self.freq_count += 1
+            now = time.time()
+            if now - self.freq_start >= 1.0:
+                freq = self.freq_count / (now - self.freq_start)
+                print(f"[LiDARGetter] Frequency: {freq:.2f} Hz")
+                with self.controller.freq_lock:
+                    self.controller.lidar_getter_freq = freq
+                self.freq_start = now
+                self.freq_count = 0
+        except Exception as e:
+            print(f"LiDARGetter Error: {e}")
+
+    def get_cloud(self):
+        with self.lidar_lock:
+            if self.latest_cloud is None:
+                return None
+            return {k: v.copy() for k, v in self.latest_cloud.items()}
+
+    def stop(self):
+        self.running = False
+        self.join()
+
 
 class ImageGetterThread(threading.Thread):
     """Image Acquisition Thread"""
@@ -336,12 +406,17 @@ class VisualLanguageController:
         self.yolo_processor_freq = 0.0
         self.yolo_pose_processor_freq = 0.0
         self.motion_control_freq = 0.0
+        self.lidar_getter_freq = 0.0
 
         # Initialize worker threads
         self.image_getter_thread = ImageGetterThread(self)
         self.yolo_processing_thread = YoloProcessingThread(self)
         self.yolo_pose_processing_thread = YoloPoseProcessingThread(self)
         self.motion_control_thread = MotionControlThread(self)
+        if not self.simulation_mode:
+            self.lidar_getter_thread = LiDARGetterThread(self)
+        else:
+            self.lidar_getter_thread = None
 
         # Load social navigaton function
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
@@ -452,9 +527,13 @@ class VisualLanguageController:
                                      font=self.small_font, anchor='w', fg='red')
         self.freq_yolo_pose_label.pack(anchor='w', pady=2)
 
-        self.freq_motion_label = Label(freq_display_frame, text="[MotionControl] Frequency: 0.00 Hz", 
+        self.freq_motion_label = Label(freq_display_frame, text="[MotionControl] Frequency: 0.00 Hz",
                                        font=self.small_font, anchor='w', fg='red')
         self.freq_motion_label.pack(anchor='w', pady=2)
+
+        self.freq_lidar_label = Label(freq_display_frame, text="[LiDARGetter] Frequency: 0.00 Hz",
+                                      font=self.small_font, anchor='w', fg='red')
+        self.freq_lidar_label.pack(anchor='w', pady=2)
 
         self.update_ui_labels()
 
@@ -483,12 +562,14 @@ class VisualLanguageController:
             yolo_freq = f"{self.yolo_processor_freq:.2f}"
             pose_freq = f"{self.yolo_pose_processor_freq:.2f}"
             motion_freq = f"{self.motion_control_freq:.2f}"
-        
+            lidar_freq = f"{self.lidar_getter_freq:.2f}"
+
         self.freq_image_label.config(text=f"[ImageGetter] Frequency: {img_freq} Hz")
         self.freq_yolo_label.config(text=f"[YoloProcessor] Frequency: {yolo_freq} Hz")
         self.freq_yolo_pose_label.config(text=f"[YoloPoseProcessor] Frequency: {pose_freq} Hz")
         self.freq_motion_label.config(text=f"[MotionControl] Frequency: {motion_freq} Hz")
-        
+        self.freq_lidar_label.config(text=f"[LiDARGetter] Frequency: {lidar_freq} Hz")
+
         # Refresh every 100ms
         self.root.after(100, self.update_freq_display)
 
@@ -716,11 +797,12 @@ class VisualLanguageController:
         # Addition of Social Nav element! Adjusts the output of L2MM motion vector
         #-----------------------------------------------------------
 
+        lidar_cloud = self.lidar_getter_thread.get_cloud() if self.lidar_getter_thread else None
         self.motion_vector = self.social_nav.step(
             motion_vector=self.motion_vector,
             pose_state=self.pose_state,
             mission_state=self.state["mission_state_in"],
-            lidar_ranges=None,  # TODO: wire Go2 lidar
+            lidar_ranges=lidar_cloud,
         )
 
     def _control_robot(self):
@@ -895,6 +977,8 @@ class VisualLanguageController:
         self.yolo_processing_thread.start()
         self.yolo_pose_processing_thread.start()
         self.motion_control_thread.start()
+        if self.lidar_getter_thread:
+            self.lidar_getter_thread.start()
 
     def stop_threads(self):
         """Stop All Worker Threads"""
@@ -902,6 +986,8 @@ class VisualLanguageController:
         self.yolo_processing_thread.stop()
         self.yolo_pose_processing_thread.stop()
         self.motion_control_thread.stop()
+        if self.lidar_getter_thread:
+            self.lidar_getter_thread.stop()
         if hasattr(self, 'webcam'):
             self.webcam.release()
         if self.camera_type == "realsense":
