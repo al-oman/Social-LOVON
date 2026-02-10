@@ -12,20 +12,19 @@ import threading
 import queue
 import argparse
 from ultralytics import YOLO
-# from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-# from unitree_sdk2py.go2.video.video_client import VideoClient as Go2VideoClient
-# from unitree_sdk2py.go2.sport.sport_client import SportClient as Go2SportClient
-# from unitree_sdk2py.h1.loco.h1_loco_client import LocoClient as H1SportClient
-# from unitree_sdk2py.b2.sport.sport_client import SportClient as B2SportClient
-# from unitree_sdk2py.b2.front_video.front_video_client import FrontVideoClient as B2FrontVideoClient
-# from unitree_sdk2py.b2.back_video.back_video_client import BackVideoClient as B2BackVideoClient
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+from unitree_sdk2py.go2.video.video_client import VideoClient as Go2VideoClient
+from unitree_sdk2py.go2.sport.sport_client import SportClient as Go2SportClient
+from unitree_sdk2py.h1.loco.h1_loco_client import LocoClient as H1SportClient
+from unitree_sdk2py.b2.sport.sport_client import SportClient as B2SportClient
+from unitree_sdk2py.b2.front_video.front_video_client import FrontVideoClient as B2FrontVideoClient
+from unitree_sdk2py.b2.back_video.back_video_client import BackVideoClient as B2BackVideoClient
 # from cxn_010.api_object_extraction_transformer import ObjectExtractionAPI
 # from cxn_010.api_language2motion_transformer import MotionPredictor
 
 from models.api_object_extraction import SequenceToSequenceClassAPI
 from models.api_language2mostion import MotionPredictor
 from models.api_social_navigator import SocialNavigator
-
 
 from tkinter import Tk, Entry, Button, Label, Frame
 from PIL import Image, ImageTk
@@ -35,7 +34,6 @@ import logging
 logging.getLogger('ultralytics').setLevel(logging.ERROR)
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
-
 
 class ImageGetterThread(threading.Thread):
     """Image Acquisition Thread"""
@@ -847,6 +845,29 @@ class VisualLanguageController:
             cv2.rectangle(image, (rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height), (0, 0, 0), -1)
             # Draw text
             cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness, cv2.LINE_AA)
+
+        safety_texts = [
+            f"SocialNav Enabled: {self.socialnav_enabled}",
+            ]
+        if hasattr(self, 'social_nav') and self.social_nav.enabled:
+            min_d = self.social_nav.diag["min_distance"]
+            n_humans = self.social_nav.diag["num_humans"]
+            safety_score = self.social_nav.safety_score
+            sheild_active = self.social_nav.shield_active
+
+            safety_texts.append(f"minimum distance: {min_d:.2f} m")
+            safety_texts.append(f"number of humans: {n_humans}")
+            safety_texts.append(f"safety score: {safety_score:.2f}")
+            safety_texts.append(f"shield active: {sheild_active}")
+        for safety_text, y in zip(safety_texts, y_positions):
+            (text_width, text_height), baseline = cv2.getTextSize(safety_text, font, font_scale, font_thickness)
+            x = image.shape[1] - text_width - 10
+            rect_x = x - padding
+            rect_y = y - text_height - padding
+            rect_width = text_width + 2 * padding
+            rect_height = text_height + baseline + 2 * padding
+            cv2.rectangle(image, (rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height), (0, 0, 0), -1)
+            cv2.putText(image, safety_text, (x, y), font, font_scale, (0, 255, 255), font_thickness, cv2.LINE_AA)
 
         return image
 

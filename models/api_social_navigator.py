@@ -89,13 +89,15 @@ class SocialNavigator:
         "lambda_v": 0.5,
         "beta_traj": 0.3,
         "d_safe": 0.8,
-        "d_yield": 1.2,
-        "d_resume": 2.0,
+        "d_max": 2.5,
+        # --- Action shield ---
+        "shield_thresh": 0.5,       # safety score below this → shield activates
+        "shield_active_states": ["running"],  # mission states where shield is armed
+        "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
+        "k_brake": 0.6,             # forward speed reduction gain
+        "v_min_scale": 0.1,         # minimum forward speed scale when braking
         "horizon_s": 2.0,
         "horizon_steps": 10,
-        "k_avoid": 0.3,
-        "v_min_scale": 0.1,
-        "d_max": 2.5,
         "mono_k": 300.0,       # placeholder: d approx mono_k / bbox_height_px
         # --- Camera intrinsics (Go2 front camera, 120deg FoV) ---
         "image_width": 640,
@@ -133,10 +135,9 @@ class SocialNavigator:
         )
         self._frame_count = 0
 
-        # --- Yielding state ---
-        self.is_yielding = False
-        self._yield_enter_time = None
-        self._clear_frames = 0
+        # --- Action shield state ---
+        self.shield_active = False
+        self.safety_score = 1.0      # 1.0 = fully safe, 0.0 = imminent collision
 
         # --- Motion vectors (for BEV drawing) ---
         self._motion_original = None
@@ -146,10 +147,9 @@ class SocialNavigator:
         self.diag = {
             "num_humans": 0,
             "min_distance": None,
-            "total_prox_cost": 0.0,
-            "total_traj_cost": 0.0,
+            "safety_score": 1.0,
+            "shield_active": False,
             "speed_scale": 1.0,
-            "is_yielding": False,
         }
 
         logger.info(
@@ -198,21 +198,21 @@ class SocialNavigator:
         # 4. Predict future trajectories
         self._predict_trajectories()
 
-        # 5. Compute social costs (placeholder -- returns zeros)
-        prox_cost, traj_cost = self._compute_social_costs()
+        # 5. Compute safety score
+        self.safety_score = self._compute_safety_score()
 
-        # 6. Evaluate yielding conditions (placeholder)
-        self._evaluate_yielding(mission_state)
+        # 6. Shield gate -- decide whether to intervene
+        self.shield_active = self._evaluate_shield(mission_state)
 
-        # 7. Modulate velocity (DISABLED -- passthrough)
-        modified_vector = self._modulate_velocity(motion_vector, prox_cost, traj_cost)
+        # 7. Command correction (only when shield is active)
+        modified_vector = self._correct_command(motion_vector)
 
         # Store both for BEV visualisation
         self._motion_original = list(motion_vector)
         self._motion_modulated = list(modified_vector)
 
         # 8. Update diagnostics
-        self._update_diagnostics(prox_cost, traj_cost)
+        self._update_diagnostics()
 
         return modified_vector
 
@@ -572,78 +572,135 @@ class SocialNavigator:
             self._predictor.reset()
 
     # ================================================================== #
-    #  STAGE 5 -- Social cost computation (placeholder)                   #
+    #  STAGE 5 -- Safety score                                             #
+    #                                                                      #
+    #  Produces a scalar in [0, 1].                                        #
+    #    1.0 = no humans nearby / fully safe                               #
+    #    0.0 = imminent collision                                          #
+    #                                                                      #
+    #  Two components, combined via min():                                 #
+    #    s_prox  – Gaussian proximity to closest human                     #
+    #    s_traj  – minimum predicted future distance over horizon          #
     # ================================================================== #
 
-    def _compute_social_costs(self):
-        # type: () -> Tuple[float, float]
+    def _compute_safety_score(self):
+        # type: () -> float
         """
-        Compute aggregate proximity and trajectory costs.
+        Compute a single safety score in [0, 1].
+
+        Components
+        ----------
+        s_prox : 1 - h * exp(-d_min^2 / 2*sigma^2)
+            Penalises current proximity to nearest human.
+
+        s_traj : min predicted distance / d_safe
+            Penalises predicted future closeness.  Clamped to [0, 1].
+
+        Returns min(s_prox, s_traj) so the most dangerous signal wins.
+        """
+        sigma = self.params["sigma"]
+        h = self.params["h"]
+        d_safe = self.params["d_safe"]
+
+        if not self._tracked_humans:
+            return 1.0
+
+        # ---- s_prox: current proximity ----
+        distances = [
+            human.distance for human in self._tracked_humans.values()
+            if human.distance is not None
+        ]
+        if distances:
+            d_min = min(distances)
+            s_prox = 1.0 - h * math.exp(-(d_min ** 2) / (2.0 * sigma ** 2))
+        else:
+            s_prox = 1.0
+
+        # ---- s_traj: predicted future proximity ----
+        # TODO: for each human, scan predicted_path to find the minimum
+        #       distance to the robot's own extrapolated path (or origin
+        #       as a first approximation).  Clamp to [0, 1].
+        s_traj = 1.0  # placeholder -- implement trajectory threat here
+
+        # ---- human awareness level ----
+        # see if detected human is facing quadruped
+        # less safe if human does not see the quadruped
+
+        score = min(s_prox, s_traj)
+        score = max(0.0, min(1.0, score))
+
+        logger.debug("safety_score=%.3f  s_prox=%.3f  s_traj=%.3f", score, s_prox, s_traj)
+        return score
+
+    # ================================================================== #
+    #  STAGE 6 -- Shield gate                                              #
+    #                                                                      #
+    #  The shield activates when BOTH conditions hold:                     #
+    #    1. safety_score < shield_thresh                                   #
+    #    2. mission_state is in shield_active_states (e.g. "running")      #
+    #                                                                      #
+    #  When the shield is inactive the command passes through untouched.   #
+    # ================================================================== #
+
+    def _evaluate_shield(self, mission_state):
+        # type: (str) -> bool
+        """
+        Returns true if the shield should be activated
+        """
+        allowed = self.params["shield_active_states"]
+        if mission_state not in allowed:
+            return False
+
+        return self.safety_score < self.params["shield_thresh"]
+
+    # ================================================================== #
+    #  STAGE 7 -- Command correction (action shield)                       #
+    #                                                                      #
+    #  When shield_active:                                                 #
+    #    1. Brake: scale forward speed by (1 - k_brake * threat)           #
+    #    2. Repulse: add lateral velocity away from nearest human          #
+    #  When shield_inactive: passthrough.                                  #
+    # ================================================================== #
+
+    def _correct_command(self, motion_vector):
+        # type: (list) -> list
+        """
+        Apply action-shield correction to the nominal L2MM command.
+
+        The original command is preserved as closely as possible;
+        corrections are the minimum needed to maintain safety.
 
         Returns:
-            (total_prox_cost, total_traj_cost) -- both 0.0 for now.
-
-        TODO:
-            - Gaussian proximity: C(d) = h * exp(-d^2 / 2*sigma^2)
-            - Relative velocity scaling
-            - Trajectory obstruction penalty
+            [v_x, v_y, omega_z]  -- corrected command.
         """
-        total_prox = 0.0
-        total_traj = 0.0
+        if not self.shield_active:
+            return motion_vector
 
-        for human in self._tracked_humans.values():
-            if human.distance is not None:
-                rf_str = "[{:.2f}, {:.2f}]".format(*human.position_rf) if human.position_rf else "n/a"
-                pred_len = len(human.predicted_path) if human.predicted_path else 0
-                logger.debug(
-                    "  human %d  dist=%.2fm  rf=%s  pred_len=%d",
-                    human.track_id, human.distance, rf_str, pred_len,
-                )
+        vx, vy, omega = motion_vector[0], motion_vector[1], motion_vector[2]
 
-        return total_prox, total_traj
+        threat = 1.0 - self.safety_score          # 0 = safe, 1 = dangerous
+        k_brake = self.params["k_brake"]
+        k_repulse = self.params["k_repulse"]
+        v_min = self.params["v_min_scale"]
 
-    # ================================================================== #
-    #  STAGE 6 -- Yielding evaluation (placeholder)                       #
-    # ================================================================== #
+        # ---- PLACEHOLDER LOGIC ----
+        vy_correction = 0
+        vx_correction = 0
+        vy_corrected = vy + vy_correction
+        vx_corrected = vx + vx_correction
 
-    def _evaluate_yielding(self, mission_state):
-        # type: (str) -> None
-        """
-        Determine whether the robot should enter/exit the yielding state.
+        logger.info(
+            "SHIELD  threat=%.2f  brake=%.2f  vx_corr=%.3f  vy %.3f->%.3f",
+            threat, vx_correction, vy, vy_corrected,
+        )
 
-        TODO:
-            - Check d_min < d_yield
-            - Check approach angle (cos_theta > 0.5)
-            - Check predicted path intersection
-            - Manage _clear_frames counter for exit
-            - Timeout after 15s -> exit yielding
-        """
-        self.is_yielding = False  # always off for now
-
-    # ================================================================== #
-    #  STAGE 7 -- Velocity modulation (DISABLED -- passthrough)           #
-    # ================================================================== #
-
-    def _modulate_velocity(self, motion_vector, prox_cost, traj_cost):
-        """
-        Apply social cost to scale / steer the motion vector.
-
-        Currently: returns motion_vector unchanged.
-
-        TODO:
-            - speed_scale = clamp(1.0 - prox - traj, v_min_scale, 1.0)
-            - v_x' = v_x * speed_scale
-            - v_y' = v_y * speed_scale
-            - omega_z' = omega_z + avoidance steering
-            - If yielding: return [0, 0, 0]
-        """
-        return motion_vector
+        return [vx_corrected, vy_corrected, omega]
 
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
     # ================================================================== #
 
-    def _update_diagnostics(self, prox_cost, traj_cost):
+    def _update_diagnostics(self):
         distances = [
             h.distance for h in self._tracked_humans.values()
             if h.distance is not None
@@ -651,17 +708,15 @@ class SocialNavigator:
         self.diag = {
             "num_humans": len(self._tracked_humans),
             "min_distance": min(distances) if distances else None,
-            "total_prox_cost": prox_cost,
-            "total_traj_cost": traj_cost,
-            "speed_scale": 1.0,
-            "is_yielding": self.is_yielding,
+            "safety_score": self.safety_score,
+            "shield_active": self.shield_active,
         }
         if self._tracked_humans:
             logger.info(
-                "humans=%d  min_d=%s  prox=%.3f  traj=%.3f  yield=%s",
+                "humans=%d  min_d=%s  safety=%.3f  shield=%s",
                 self.diag["num_humans"],
                 "{:.2f}m".format(self.diag["min_distance"]) if self.diag["min_distance"] else "n/a",
-                prox_cost, traj_cost, self.is_yielding,
+                self.safety_score, self.shield_active,
             )
 
     # ================================================================== #
