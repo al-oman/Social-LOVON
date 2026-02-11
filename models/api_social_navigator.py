@@ -117,6 +117,10 @@ class SocialNavigator:
         "lidar_z_max": 1.0,           # meters, max Z relative to sensor (above sensor)
         "lidar_angle_margin_deg": 2.0, # degrees, angular padding on bbox edges
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
+        # --- BEV minimap display ---
+        "bev_range_m": 5.0,            # visible range in BEV (meters), independent of d_max
+        "bev_z_min": 0.0,             # BEV display Z filter min (sensor-relative)
+        "bev_z_max": 0.1,             # BEV display Z filter max (tight band = clean slice)
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -795,8 +799,8 @@ class SocialNavigator:
         sz = 600
         margin = 10
         pad = 60
-        d_max = self.params["d_max"]
-        scale = (sz - 2 * pad) / d_max   # px per meter
+        bev_range = self.params["bev_range_m"]
+        scale = (sz - 2 * pad) / bev_range   # px per meter
 
         h, w = image.shape[:2]
         if w < sz + margin or h < sz + margin:
@@ -816,14 +820,13 @@ class SocialNavigator:
         rcy = y0 + sz - pad
 
         # Range-ring semicircles (forward half)
-        for r_m in np.arange(0.5, d_max + 0.01, 0.5):
+        for r_m in np.arange(1.0, bev_range + 0.01, 1.0):
             r_px = int(r_m * scale)
             _cv2.ellipse(image, (rcx, rcy), (r_px, r_px), 0, 180, 360,
                          (80, 80, 80), 1, _cv2.LINE_AA)
-            if r_m % 1.0 < 0.01:  # label at 1 m, 2 m, …
-                _cv2.putText(image, "{}m".format(int(r_m)),
-                             (rcx + 3, rcy - r_px + 5),
-                             _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
+            _cv2.putText(image, "{}m".format(int(r_m)),
+                         (rcx + 3, rcy - r_px + 5),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
 
         # --- LiDAR point cloud ---
         if has_lidar:
@@ -840,11 +843,11 @@ class SocialNavigator:
                     # Filter: remove origin noise
                     dist_sq = lx ** 2 + ly ** 2 + lz ** 2
                     mask &= dist_sq > 0.01 ** 2
-                    # Filter: forward, within d_max, within height range
+                    # Filter: forward, within BEV range, BEV-specific Z band
                     mask &= lx > 0
-                    mask &= (lx ** 2 + ly ** 2) <= d_max ** 2
-                    mask &= ((lz >= self.params["lidar_z_min"])
-                             & (lz <= self.params["lidar_z_max"]))
+                    mask &= (lx ** 2 + ly ** 2) <= bev_range ** 2
+                    mask &= ((lz >= self.params["bev_z_min"])
+                             & (lz <= self.params["bev_z_max"]))
 
                     fx = lx[mask]
                     fy = ly[mask]
