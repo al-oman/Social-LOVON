@@ -937,7 +937,7 @@ class VisualLanguageController:
             safety_score = self.social_nav.safety_score
             sheild_active = self.social_nav.shield_active
 
-            safety_texts.append(f"minimum distance: {min_d:.2f} m")
+            safety_texts.append(f"minimum distance: {min_d:.2f} m" if min_d is not None else "minimum distance: n/a")
             safety_texts.append(f"number of humans: {n_humans}")
             safety_texts.append(f"safety score: {safety_score:.2f}")
             safety_texts.append(f"shield active: {sheild_active}")

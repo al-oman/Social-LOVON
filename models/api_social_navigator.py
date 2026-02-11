@@ -835,34 +835,43 @@ class SocialNavigator:
                 ly = np.asarray(ly, dtype=np.float64)
                 lz = np.asarray(lz, dtype=np.float64)
                 if lx.size > 0:
+                    # Filter: finite values only
+                    mask = np.isfinite(lx) & np.isfinite(ly) & np.isfinite(lz)
+                    # Filter: remove origin noise
+                    dist_sq = lx ** 2 + ly ** 2 + lz ** 2
+                    mask &= dist_sq > 0.01 ** 2
                     # Filter: forward, within d_max, within height range
-                    mask = lx > 0
-                    dist = np.sqrt(lx ** 2 + ly ** 2)
-                    mask &= dist <= d_max
+                    mask &= lx > 0
+                    mask &= (lx ** 2 + ly ** 2) <= d_max ** 2
                     mask &= ((lz >= self.params["lidar_z_min"])
                              & (lz <= self.params["lidar_z_max"]))
 
-                    # Robot frame → BEV pixel (x=forward, y=left)
-                    px_arr = (rcx + (-ly[mask]) * scale).astype(np.int32)
-                    py_arr = (rcy - lx[mask] * scale).astype(np.int32)
+                    fx = lx[mask]
+                    fy = ly[mask]
+                    fz = lz[mask]
 
-                    # Clip to minimap bounds
-                    in_bounds = ((px_arr >= x0) & (px_arr <= x0 + sz)
-                                 & (py_arr >= y0) & (py_arr <= y0 + sz))
-                    px_arr = px_arr[in_bounds]
-                    py_arr = py_arr[in_bounds]
+                    if len(fx) > 0:
+                        # Robot frame → BEV pixel (x=forward, y=left)
+                        px_arr = (rcx + (-fy) * scale).astype(np.int32)
+                        py_arr = (rcy - fx * scale).astype(np.int32)
 
-                    # Subsample if needed for draw performance
-                    n_pts = len(px_arr)
-                    if n_pts > 1500:
-                        stride = n_pts // 1500
-                        px_arr = px_arr[::stride]
-                        py_arr = py_arr[::stride]
+                        # Clip to minimap bounds
+                        in_bounds = ((px_arr >= x0) & (px_arr < x0 + sz)
+                                     & (py_arr >= y0) & (py_arr < y0 + sz))
+                        px_arr = px_arr[in_bounds]
+                        py_arr = py_arr[in_bounds]
+                        fz = fz[in_bounds]
 
-                    for i in range(len(px_arr)):
-                        _cv2.circle(image,
-                                    (int(px_arr[i]), int(py_arr[i])),
-                                    2, (160, 140, 80), -1)  # muted teal
+                        # Z-height colormap (JET)
+                        z_min, z_max = fz.min(), fz.max()
+                        z_span = z_max - z_min if (z_max - z_min) > 1e-3 else 1.0
+                        z_norm = ((fz - z_min) / z_span * 255).astype(np.uint8)
+                        colors = _cv2.applyColorMap(
+                            z_norm.reshape(-1, 1), _cv2.COLORMAP_JET
+                        ).reshape(-1, 3)
+
+                        # Direct 1px pixel writes (fast + clean)
+                        image[py_arr, px_arr] = colors
 
         # Robot marker (on top of lidar points)
         _cv2.drawMarker(image, (rcx, rcy), (0, 255, 0),
