@@ -336,7 +336,8 @@ class VisualLanguageController:
                  blur_threshold=10.0,
                  lengthen_filter=3,
                  simulation_mode=False, 
-                 socialnav_enabled=False):
+                 socialnav_enabled=False,
+                 network_device="enp8s0"):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
@@ -361,6 +362,7 @@ class VisualLanguageController:
         self.simulation_mode = simulation_mode  # Whether to run in simulation mode
         self.socialnav_enabled = socialnav_enabled  # Whether to enable social navigation adjustments
         self.button_update_inst = False
+        self.network_device = network_device
 
         # Initialize RealSense camera if selected
         # if self.camera_type == "realsense":
@@ -589,7 +591,7 @@ class VisualLanguageController:
     def _init_channel_factory(self):
         """Initialize Unitree Channel Factory"""
         if len(sys.argv) > 1:
-            ChannelFactoryInitialize(0, sys.argv[1])
+            ChannelFactoryInitialize(0,self.network_device)
         else:
             ChannelFactoryInitialize(0)
 
@@ -1047,10 +1049,11 @@ if __name__ == "__main__":
                   help='Enable social navigation adjustments')
     parser.add_argument('--image_width', type=int, default=640,
                       help='Width of input images')
+    parser.add_argument('--network_device', type=str, default="enp8s0",
+                      help='Netowrk Card')
     args = parser.parse_args()
 
     # Initialize and run controller
-    print("hello!!!!", args.socialnav_enabled)
     controller = VisualLanguageController(
         yolo_model_dir=args.yolo_model_dir,
         yolo_pose_model_dir=args.yolo_pose_model_dir,
@@ -1065,7 +1068,8 @@ if __name__ == "__main__":
         blur_threshold=args.threshold,
         lengthen_filter=args.lengthen_filter,
         simulation_mode=args.simulation_mode,
-        socialnav_enabled=args.socialnav_enabled
+        socialnav_enabled=args.socialnav_enabled,
+        network_device=args.network_device
     )
     controller.run()
     print("Program terminated.")
