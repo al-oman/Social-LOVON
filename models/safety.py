@@ -1,12 +1,6 @@
 """
 Shared safety computation for Social-LOVON.
 ============================================
-Pure-math functions for Gaussian proximity safety scoring.
-Used by:
-  - SocialNavigator._compute_safety_score() (per-human scalar)
-  - CrowdSim.compute_safety_field() (2D grid, via injection)
-
-All functions are stateless and operate on numpy arrays.
 """
 
 import math
@@ -95,10 +89,6 @@ def compute_safety_grid(human_positions, xlim, ylim, resolution=0.1,
     return safety, extent
 
 
-# ------------------------------------------------------------------
-#  Coordinate transform: world frame -> robot frame
-# ------------------------------------------------------------------
-
 def trajectory_safety_score(robot_path, human_paths, sigma=0.8, h=1.0):
     """
     Compute worst-case safety score across all future timesteps and humans.
@@ -138,6 +128,11 @@ def trajectory_safety_score(robot_path, human_paths, sigma=0.8, h=1.0):
 
     return worst_score
 
+
+
+# ------------------------------------------------------------------
+#  Coordinate transform: world frame -> robot frame
+# ------------------------------------------------------------------
 
 def world_to_robot_frame(human_px, human_py, robot_px, robot_py, robot_theta):
     """
