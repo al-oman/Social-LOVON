@@ -1,9 +1,3 @@
-import sys
-import os
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-sys.path.append(project_root)
-
 import logging
 import argparse
 import configparser
@@ -18,13 +12,11 @@ from crowd_sim.envs.policy.orca import ORCA
 
 from crowd_sim.envs.utils.action import ActionRot
 
-from models.lovon_crowd_policy import LOVONCrowdPolicy
-
 
 def main():
     parser = argparse.ArgumentParser('Parse configuration file')
-    parser.add_argument('--env_config', type=str, default='configs/env_lovon.config')
-    parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config')
+    parser.add_argument('--env_config', type=str, default='configs/env.config')
+    parser.add_argument('--policy_config', type=str, default='configs/policy.config')
     parser.add_argument('--policy', type=str, default='orca')
     parser.add_argument('--model_dir', type=str, default=None)
     parser.add_argument('--il', default=False, action='store_true')
@@ -62,17 +54,11 @@ def main():
     logging.info('Using device: %s', device)
 
     # configure policy
+    policy = policy_factory[args.policy]()
     policy_config = configparser.RawConfigParser()
     policy_config.read(policy_config_file)
-    policy = LOVONCrowdPolicy()
     policy.configure(policy_config)
-    policy.load_lovon(
-        model_path="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success",
-        tokenizer_path="models/tokenizer_language2motion_n1000000",
-        social_nav_enabled=True,
-    )
-    policy.set_mission("navigate to the goal")
-
+    # print(dict(policy_config.items('action_space')))
     if policy.trainable:
         if args.model_dir is None:
             parser.error('Trainable policy must be specified with a model weights directory')
@@ -89,6 +75,7 @@ def main():
         env.test_sim = 'circle_crossing'
     robot = Robot(env_config, 'robot')
     robot.set_policy(policy)
+    print(robot.kinematics)
     env.set_robot(robot)
     explorer = Explorer(env, robot, device, gamma=0.9)
 
@@ -111,7 +98,8 @@ def main():
         done = False
         last_pos = np.array(robot.get_position())
         while not done:
-            action = robot.act(ob)
+            # action = robot.act(ob)
+            action = ActionRot(v=1, r=1)
             print(action)
             ob, _, done, info = env.step(action)
             current_pos = np.array(robot.get_position())

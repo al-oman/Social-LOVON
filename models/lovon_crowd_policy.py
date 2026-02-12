@@ -33,6 +33,7 @@ class LOVONCrowdPolicy(Policy):
     def __init__(self):
         super().__init__()
         self.trainable = False
+        self.multiagent_training = True
         self.kinematics = "unicycle"  # or "holonomic" -- set in configure()
         self.name = "lovon"
 
