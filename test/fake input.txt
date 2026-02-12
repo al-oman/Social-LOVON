@@ -1,0 +1,9 @@
+input:  {'mission_instruction_0': 'approach the bag at 0.5 m/', 'mission_instruction_1': 'approach the bag at 0.5 m/', 'predicted_object': 'handbag', 'confidence': [0.8823556303977966], 'object_xyn': [0.4961559772491455, 0.6160123944282532], 'object_whn': [0.22347533702850342, 0.2042352706193924], 'mission_state_in': 'running', 'search_state_in': 'had_searching_1', 'bounding_box': [738, 555, 1167, 775]}
+output:  {'motion_vector': [0.55, 0.0, -0.03], 'predicted_state': 'running', 'search_state': 'had_searching_1'}
+
+
+## this was the part that didn't work:
+"mission_instruction_0":"Make way to avian at the specified speed of -0.11 m\/s",
+"mission_object_0":"bird",
+"mission_instruction_1":"Make way to clutch at the specified speed of 1.19 m\/s",
+"mission_object_1":"handbag",

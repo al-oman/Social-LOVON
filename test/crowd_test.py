@@ -10,7 +10,7 @@ from crowd_nav.policy.policy_factory import policy_factory
 from crowd_sim.envs.utils.robot import Robot
 from crowd_sim.envs.policy.orca import ORCA
 
-from crowd_sim.envs.utils.action import ActionXY
+from crowd_sim.envs.utils.action import ActionRot
 
 
 def main():
@@ -42,7 +42,10 @@ def main():
                 model_weights = os.path.join(args.model_dir, 'rl_model.pth')
     else:
         env_config_file = args.env_config
-        policy_config_file = args.env_config
+        policy_config_file = args.policy_config
+    print("model_dir:", args.model_dir)
+    print(policy_config_file)
+    print(env_config_file)
 
     # configure logging and device
     logging.basicConfig(level=logging.INFO, format='%(asctime)s, %(levelname)s: %(message)s',
@@ -55,6 +58,7 @@ def main():
     policy_config = configparser.RawConfigParser()
     policy_config.read(policy_config_file)
     policy.configure(policy_config)
+    # print(dict(policy_config.items('action_space')))
     if policy.trainable:
         if args.model_dir is None:
             parser.error('Trainable policy must be specified with a model weights directory')
@@ -71,6 +75,7 @@ def main():
         env.test_sim = 'circle_crossing'
     robot = Robot(env_config, 'robot')
     robot.set_policy(policy)
+    print(robot.kinematics)
     env.set_robot(robot)
     explorer = Explorer(env, robot, device, gamma=0.9)
 
@@ -94,7 +99,7 @@ def main():
         last_pos = np.array(robot.get_position())
         while not done:
             # action = robot.act(ob)
-            action = ActionXY(vx=1, vy=1)
+            action = ActionRot(v=1, r=1)
             print(action)
             ob, _, done, info = env.step(action)
             current_pos = np.array(robot.get_position())

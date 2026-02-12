@@ -337,7 +337,8 @@ class VisualLanguageController:
                  lengthen_filter=3,
                  simulation_mode=False, 
                  socialnav_enabled=False,
-                 network_device="enp8s0"):
+                 network_device="enp8s0",
+                 disable_motion_commands=False):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
@@ -363,6 +364,7 @@ class VisualLanguageController:
         self.socialnav_enabled = socialnav_enabled  # Whether to enable social navigation adjustments
         self.button_update_inst = False
         self.network_device = network_device
+        self.disable_motion_commands = disable_motion_commands
 
         # Initialize RealSense camera if selected
         # if self.camera_type == "realsense":
@@ -790,7 +792,9 @@ class VisualLanguageController:
             "mission_instruction_1": self.mission_instruction_1,
             **state
         }
+        print("input: ", input_data)
         prediction = self.motion_predictor.predict(input_data)
+        print("output: ", prediction)
         self.state["mission_state_in"] = prediction["predicted_state"]
         self.state["search_state_in"] = prediction["search_state"]
         self.motion_vector = prediction["motion_vector"]
@@ -811,7 +815,7 @@ class VisualLanguageController:
         """Send Motion Commands to Robot"""
         if hasattr(self, 'motion_vector'):
             v_x, v_y, w_z = [float(val) for val in self.motion_vector]
-            if self.simulation_mode:
+            if self.simulation_mode or self.disable_motion_commands:
                 print(f"vx={v_x:.4f}, vy={v_y:.4f}, wz={w_z:.4f}")
             else:
                 self.sport_client.Move(v_x, v_y, w_z)
@@ -973,6 +977,9 @@ class VisualLanguageController:
             print(f"Image update error: {e}")
         self.root.after(100, self.update_image)
 
+        # for diagnostics
+        # print(self.state)
+
     def start_threads(self):
         """Start All Worker Threads"""
         self.image_getter_thread.start()
@@ -1003,77 +1010,82 @@ class VisualLanguageController:
         self.root.mainloop()
         self.stop_threads()
 
-"""
-if __name__ == "__main__":
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='Visual Language Motion Controller for Unitree Robots')
-    
-    # Model paths
-    parser.add_argument('--yolo_model_dir', type=str, default="models/yolo-models/yolo11x.pt",
-                      help='Path to YOLO model directory')
-    parser.add_argument('--yolo_pose_model_dir', type=str, default="models/yolo-models/yolo26n-pose.pt",
-                      help='Path to YOLO pose model directory')
-    parser.add_argument('--tokenizer_path', type=str, default="models/tokenizer_language2motion_n1000000",
-                      help='Path to tokenizer')
-    parser.add_argument('--object_extraction_model_path', type=str, 
-                      default="models/model_object_extraction_n1000000_d64_h4_l2_f256_msl64_hold_success",
-                      help='Path to object extraction model')
-    parser.add_argument('--language2motion_model_path', type=str,
-                      default="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success",
-                      help='Path to language-to-motion model')
-    
-    # Hardware configuration
-    parser.add_argument('--camera_type', type=str, default='inner',
-                      choices=['inner', 'realsense'], help='Camera type (inner or realsense)')
-    parser.add_argument('--robot_type', type=str, default='go2',
-                      choices=['go2', 'h1', 'b2'], help='Robot type (go2, h1, or b2)')
-    
-    # Display options
-    parser.add_argument('--show_video', action='store_true', default=True,
-                      help='Show video stream')
-    parser.add_argument('--show_max_result', action='store_true', default=True,
-                      help='Show detection results')
-    parser.add_argument('--show_arrowed', action='store_true', default=False,
-                      help='Show direction arrows')
-    
-    # Algorithm parameters
-    parser.add_argument('--threshold', type=float, default=10.0,
-                      help='Blur detection threshold')
-    parser.add_argument('--lengthen_filter', type=int, default=1,
-                      help='Number of historical detection results to keep')
-    
-    # Added parameters
-    parser.add_argument('--simulation_mode', action='store_true', default=False,
-                  help='Run in simulation mode (webcam + print commands)')
-    parser.add_argument('--socialnav_enabled', action='store_true', default=False,
-                  help='Enable social navigation adjustments')
-    parser.add_argument('--image_width', type=int, default=640,
-                      help='Width of input images')
-    parser.add_argument('--network_device', type=str, default="enp8s0",
-                      help='Netowrk Card')
-    args = parser.parse_args()
 
-    # Initialize and run controller
-    controller = VisualLanguageController(
-        yolo_model_dir=args.yolo_model_dir,
-        yolo_pose_model_dir=args.yolo_pose_model_dir,
-        tokenizer_path=args.tokenizer_path,
-        object_extraction_model_path=args.object_extraction_model_path,
-        language2motion_model_path=args.language2motion_model_path,
-        camera_type=args.camera_type,
-        robot_type=args.robot_type,
-        show_video=args.show_video,
-        show_max_result=args.show_max_result,
-        show_arrowed=args.show_arrowed,
-        blur_threshold=args.threshold,
-        lengthen_filter=args.lengthen_filter,
-        simulation_mode=args.simulation_mode,
-        socialnav_enabled=args.socialnav_enabled,
-        network_device=args.network_device
-    )
-    controller.run()
-    print("Program terminated.")
-"""
+# if __name__ == "__main__":
+#     # Parse command-line arguments
+#     parser = argparse.ArgumentParser(description='Visual Language Motion Controller for Unitree Robots')
+    
+#     # Model paths
+#     parser.add_argument('--yolo_model_dir', type=str, default="models/yolo-models/yolo11x.pt",
+#                       help='Path to YOLO model directory')
+#     parser.add_argument('--yolo_pose_model_dir', type=str, default="models/yolo-models/yolo26n-pose.pt",
+#                       help='Path to YOLO pose model directory')
+#     parser.add_argument('--tokenizer_path', type=str, default="models/tokenizer_language2motion_n1000000",
+#                       help='Path to tokenizer')
+#     parser.add_argument('--object_extraction_model_path', type=str, 
+#                       default="models/model_object_extraction_n1000000_d64_h4_l2_f256_msl64_hold_success",
+#                       help='Path to object extraction model')
+#     parser.add_argument('--language2motion_model_path', type=str,
+#                       default="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success",
+#                       help='Path to language-to-motion model')
+    
+#     # Hardware configuration
+#     parser.add_argument('--camera_type', type=str, default='inner',
+#                       choices=['inner', 'realsense'], help='Camera type (inner or realsense)')
+#     parser.add_argument('--robot_type', type=str, default='go2',
+#                       choices=['go2', 'h1', 'b2'], help='Robot type (go2, h1, or b2)')
+    
+#     # Display options
+#     parser.add_argument('--show_video', action='store_true', default=True,
+#                       help='Show video stream')
+#     parser.add_argument('--show_max_result', action='store_true', default=True,
+#                       help='Show detection results')
+#     parser.add_argument('--show_arrowed', action='store_true', default=False,
+#                       help='Show direction arrows')
+    
+#     # Algorithm parameters
+#     parser.add_argument('--threshold', type=float, default=10.0,
+#                       help='Blur detection threshold')
+#     parser.add_argument('--lengthen_filter', type=int, default=1,
+#                       help='Number of historical detection results to keep')
+    
+#     # Added parameters
+#     parser.add_argument('--simulation_mode', action='store_true', default=False,
+#                   help='Run in simulation mode (webcam + print commands)')
+#     parser.add_argument('--socialnav_enabled', action='store_true', default=False,
+#                   help='Enable social navigation adjustments')
+#     parser.add_argument('--image_width', type=int, default=640,
+#                       help='Width of input images')
+#     parser.add_argument('--network_device', type=str, default="enp8s0",
+#                       help='Netowrk Card')
+#     parser.add_argument('--disable_motion_commands', action='store_true', default=False,
+#                   help='stop sending motion commands to dog')
+#     args = parser.parse_args()
+
+#     print(args)
+
+#     # Initialize and run controller
+#     controller = VisualLanguageController(
+#         yolo_model_dir=args.yolo_model_dir,
+#         yolo_pose_model_dir=args.yolo_pose_model_dir,
+#         tokenizer_path=args.tokenizer_path,
+#         object_extraction_model_path=args.object_extraction_model_path,
+#         language2motion_model_path=args.language2motion_model_path,
+#         camera_type=args.camera_type,
+#         robot_type=args.robot_type,
+#         show_video=args.show_video,
+#         show_max_result=args.show_max_result,
+#         show_arrowed=args.show_arrowed,
+#         blur_threshold=args.threshold,
+#         lengthen_filter=args.lengthen_filter,
+#         simulation_mode=args.simulation_mode,
+#         socialnav_enabled=args.socialnav_enabled,
+#         network_device=args.network_device,
+#         disable_motion_commands=args.disable_motion_commands,
+#     )
+#     controller.run()
+#     print("Program terminated.")
+
 
 import matplotlib.pyplot as plt
 from crowd_sim.envs.utils.action import ActionXY
@@ -1085,23 +1097,46 @@ predictor = MotionPredictor(
 # Example input ground truth
 # sample_input = {"mission_instruction_0":"Make haste to auto at -0.05 m\/s","mission_object_0":"car","mission_instruction_1":"Make haste to cutlery at 0.82 m\/s","mission_object_1":"knife","predicted_object":"knife","confidence":[0.5354537108],"object_xyn":[0.6707287949,0.22678588],"object_whn":[0.5876534978,0.862209081],"mission_state_in":"running","search_state_in":"had_searching_1","motion_vector":[0.82,0.0,-0.3414575898],"mission_state_out":"searching_1","search_state_out":"had_searching_1"}
 
+# sample_input = {"mission_instruction_0":"Make way to avian at the specified speed of -0.11 m\/s",
+#                 "mission_object_0":"bird",
+#                 "mission_instruction_1":"Make way to clutch at the specified speed of 1.19 m\/s",
+#                 "mission_object_1":"handbag",
+#                 "predicted_object":"handbag",
+#                 "confidence":[0.9],
+#                 # "object_xyn":[0.2312953662,0.3076264599],
+#                 "object_xyn":[0.5,0.5],
+#                 "object_whn":[0.2,0.2],
+#                 "mission_state_in":"running",
+#                 "search_state_in":"running",
+#                 "motion_vector":[0.2,0.0,0.0],
+#                 "mission_state_out":"running",
+#                 "search_state_out":"running"}
+
+# sample_input = {'mission_instruction_0': 'approach the bag at 0.5 m/', 
+#                 'mission_instruction_1': 'approach the bag at 0.5 m/', 
+#                 'predicted_object': 'handbag', 
+#                 'confidence': [0.8823556303977966], 
+#                 'object_xyn': [0.5, 0.5], 
+#                 'object_whn': [0.2, 0.2],
+#                 'motion_vector': [0.5, 0, 0], 
+#                 'mission_state_in': 'running', 
+#                 'search_state_in': 'running',
+#                 "mission_state_out":"running",
+#                 "search_state_out":"running"}
+
 sample_input = {"mission_instruction_0":"Make way to avian at the specified speed of -0.11 m\/s",
                 "mission_object_0":"bird",
                 "mission_instruction_1":"Make way to clutch at the specified speed of 1.19 m\/s",
                 "mission_object_1":"handbag",
-                "predicted_object":"handbag",
-                "confidence":[0.9],
-                # "object_xyn":[0.2312953662,0.3076264599],
-                "object_xyn":[0.5,0.5],
-                "object_whn":[0.2,0.2],
-                "mission_state_in":"running",
-                "search_state_in":"running",
-                "motion_vector":[0.2,0.0,0.0],
+                "predicted_object":"handbag", 
+                'confidence': [0.8823556303977966], 
+                'object_xyn': [0.5, 0.5], 
+                'object_whn': [0.2, 0.2],
+                'motion_vector': [0.5, 0, 0], 
+                'mission_state_in': 'running', 
+                'search_state_in': 'running',
                 "mission_state_out":"running",
                 "search_state_out":"running"}
-
-# sample_input = {"mission_instruction_0":"Make haste to auto at -0.05 m\/s","mission_object_0":"car","mission_instruction_1":"Make haste to cutlery at 0.82 m\/s","mission_object_1":"knife","predicted_object":"knife","confidence":[0.5354537108],"object_xyn":[0.6707287949,0.22678588],"object_whn":[0.5876534978,0.862209081],"mission_state_in":"running","search_state_in":"had_searching_1","motion_vector":[0.82,0.0,-0.3414575898],"mission_state_out":"searching_1","search_state_out":"had_searching_1"}
-
 
 print(predictor.predict(sample_input))
 
