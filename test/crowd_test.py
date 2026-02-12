@@ -107,9 +107,10 @@ def main():
     env.configure(env_config)
 
     # Inject shared safety calculator so heatmap uses models.safety math
-    def _safety_calculator(human_states, xlim, ylim, resolution=0.1):
+    # All safety parameters (resolution, sigma, h) are owned by Social-LOVON
+    def _safety_calculator(human_states, xlim, ylim):
         human_positions = [(h.px, h.py) for h in human_states]
-        return compute_safety_grid(human_positions, xlim, ylim, resolution)
+        return compute_safety_grid(human_positions, xlim, ylim)
     env.safety_calculator = _safety_calculator
 
     if args.square:

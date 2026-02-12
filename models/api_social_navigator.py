@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
-from models.safety import aggregate_safety_score, trajectory_safety_score
+from models.safety import combined_safety_score
 
 logger = logging.getLogger("SocialNavigator")
 logger.setLevel(logging.DEBUG)
@@ -730,14 +730,6 @@ class SocialNavigator:
 
     # ================================================================== #
     #  STAGE 5 -- Safety score                                             #
-    #                                                                      #
-    #  Produces a scalar in [0, 1].                                        #
-    #    1.0 = no humans nearby / fully safe                               #
-    #    0.0 = imminent collision                                          #
-    #                                                                      #
-    #  Two components, combined via min():                                 #
-    #    s_prox  – Gaussian proximity to closest human                     #
-    #    s_traj  – minimum predicted future distance over horizon          #
     # ================================================================== #
 
     def _compute_safety_score(self):
@@ -757,30 +749,26 @@ class SocialNavigator:
         if not self._tracked_humans:
             return 1.0
 
-        # ---- s_prox: current proximity (via shared safety function) ----
         distances = [
             human.distance for human in self._tracked_humans.values()
             if human.distance is not None
         ]
-        s_prox = aggregate_safety_score(distances, sigma=sigma, h=h)
 
-        # ---- s_traj: predicted future proximity ----
-        robot_path = self._robot_predicted_path
-        if robot_path:
-            human_paths = {}
-            for human in self._tracked_humans.values():
-                if human.predicted_path:
-                    human_paths[human.track_id] = human.predicted_path
-            s_traj = trajectory_safety_score(
-                robot_path, human_paths, sigma=sigma, h=h
-            )
-        else:
-            s_traj = 1.0
+        human_paths = {
+            human.track_id: human.predicted_path
+            for human in self._tracked_humans.values()
+            if human.predicted_path
+        }
 
-        score = min(s_prox, s_traj)
-        score = max(0.0, min(1.0, score))
+        score = combined_safety_score(
+            distances=distances,
+            robot_path=self._robot_predicted_path,
+            human_paths=human_paths,
+            sigma=sigma,
+            h=h,
+        )
 
-        logger.debug("safety_score=%.3f  s_prox=%.3f  s_traj=%.3f", score, s_prox, s_traj)
+        logger.debug("safety_score=%.3f", score)
         return score
 
     # ================================================================== #
@@ -812,6 +800,8 @@ class SocialNavigator:
             passthrough
         Returns:
             [v_x', v_y', omega_z']  -- corrected motion vector
+
+        
         """
         if not self.shield_active:
             return motion_vector

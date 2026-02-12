@@ -56,7 +56,7 @@ class LOVONCrowdPolicy(Policy):
         self.goal_radius = 0.1
 
     # ------------------------------------------------------------------ #
-    #  CrowdNav interface                                                  #
+    #  CrowdNav interfacing                                                  #
     # ------------------------------------------------------------------ #
 
     def configure(self, config):
@@ -146,18 +146,6 @@ class LOVONCrowdPolicy(Policy):
         """
         takes CrowdNav states and creates input for L2MM
         """
-        # # Compute direction and distance to goal
-        # dx = self_state.gx - self_state.px
-        # dy = self_state.gy - self_state.py
-        # goal_dist = np.hypot(dx, dy)
-        # goal_angle = np.arctan2(dy, dx) - self_state.theta
-
-        # # pinhole model of camera for angle to pixel
-        # # whn is normalized size of bounding box
-        # # xyn is normalized coords of centre of bounding box: [0.5, 0.5]
-
-        # x = 0.5 + np.tan(np.radians(goal_angle))/(2*np.tan(np.radians(self.fov/2)))
-        # x = np.clip(x, 0.0, 1.0)
 
         xyn, whn = self._angle_to_xyn_whn(self_state)
 
@@ -210,7 +198,6 @@ class LOVONCrowdPolicy(Policy):
 
         For each human:
           - Transform (px, py) to robot-frame [x_lateral, depth]
-          - Compute Euclidean distance
           - Transform (vx, vy) to robot-frame velocity
 
         Args:
@@ -260,14 +247,13 @@ class LOVONCrowdPolicy(Policy):
 
         # placeholder logic for bounding box size prediction from sim state
         if goal_dist < self.goal_radius:
-            print('else')
+            print('approaching goal!')
             whn = [0.4, 0.4]
         else:
             whn = [0.1, 0.1] 
 
 
         return xyn, whn
-
 
     def _to_action(self, motion_vector, self_state):
         """
