@@ -7,7 +7,6 @@ sys.path.append(project_root)
 import logging
 import argparse
 import configparser
-import os
 import torch
 import numpy as np
 import gym
@@ -16,10 +15,28 @@ from crowd_nav.policy.policy_factory import policy_factory
 from crowd_sim.envs.utils.robot import Robot
 from crowd_sim.envs.policy.orca import ORCA
 
-from crowd_sim.envs.utils.action import ActionRot
-
 from models.lovon_crowd_policy import LOVONCrowdPolicy
 
+# register LOVON policy in the factory
+policy_factory['lovon'] = LOVONCrowdPolicy
+
+def display_config(env_config, env_config_file, policy_config, policy_config_file):
+    print("\n" + "="*80)
+    print("POLICY CONFIG FILE:", os.path.abspath(policy_config_file))
+    print("="*80)
+    for section in policy_config.sections():
+        print(f"\n[{section}]")
+        for key, value in policy_config.items(section):
+            print(f"{key} = {value}")
+
+    print("\n" + "="*80)
+    print("ENV CONFIG FILE:", os.path.abspath(env_config_file))
+    print("="*80)
+    for section in env_config.sections():
+        print(f"\n[{section}]")
+        for key, value in env_config.items(section):
+            print(f"{key} = {value}")
+    print("="*80 + "\n")
 
 def main():
     parser = argparse.ArgumentParser('Parse configuration file')
@@ -36,6 +53,8 @@ def main():
     parser.add_argument('--circle', default=False, action='store_true')
     parser.add_argument('--video_file', type=str, default=None)
     parser.add_argument('--traj', default=False, action='store_true')
+    parser.add_argument('--safety_heatmap', default=False, action='store_true')
+    parser.add_argument('--goal', type=str, default='run to bag at 1.0 m/s')
     args = parser.parse_args()
 
     if args.model_dir is not None:
@@ -51,9 +70,6 @@ def main():
     else:
         env_config_file = args.env_config
         policy_config_file = args.policy_config
-    print("model_dir:", args.model_dir)
-    print(policy_config_file)
-    print(env_config_file)
 
     # configure logging and device
     logging.basicConfig(level=logging.INFO, format='%(asctime)s, %(levelname)s: %(message)s',
@@ -62,16 +78,21 @@ def main():
     logging.info('Using device: %s', device)
 
     # configure policy
+    policy = policy_factory[args.policy]()
     policy_config = configparser.RawConfigParser()
     policy_config.read(policy_config_file)
-    policy = LOVONCrowdPolicy()
     policy.configure(policy_config)
-    policy.load_lovon(
-        model_path="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success",
-        tokenizer_path="models/tokenizer_language2motion_n1000000",
-        social_nav_enabled=True,
-    )
-    policy.set_mission("navigate to the goal")
+
+    # LOVON-specific setup
+    if args.policy == 'lovon':
+        policy.load_lovon(
+            model_path="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success",
+            tokenizer_path="models/tokenizer_language2motion_n1000000",
+            social_nav_enabled=True,
+        )
+        policy.set_mission(args.goal,
+                           args.goal, 
+                           "handbag")
 
     if policy.trainable:
         if args.model_dir is None:
@@ -92,6 +113,9 @@ def main():
     env.set_robot(robot)
     explorer = Explorer(env, robot, device, gamma=0.9)
 
+    # Display experiment information
+    display_config(env_config, env_config_file, policy_config, policy_config_file)
+
     policy.set_phase(args.phase)
     policy.set_device(device)
     # set safety space for ORCA in non-cooperative simulation
@@ -99,8 +123,6 @@ def main():
         if robot.visible:
             robot.policy.safety_space = 0
         else:
-            # because invisible case breaks the reciprocal assumption
-            # adding some safety space improves ORCA performance. Tune this value based on your need.
             robot.policy.safety_space = 0
         logging.info('ORCA agent buffer: %f', robot.policy.safety_space)
 
@@ -120,7 +142,7 @@ def main():
         if args.traj:
             env.render('traj', args.video_file)
         else:
-            env.render('video', args.video_file)
+            env.render('video', args.video_file, safety_heatmap=args.safety_heatmap)
 
         logging.info('It takes %.2f seconds to finish. Final status is %s', env.global_time, info)
         if robot.visible and info == 'reach goal':

@@ -48,6 +48,10 @@ class LOVONCrowdPolicy(Policy):
         self.mission_state_in = "running"
         self.search_state_in = "had_searching_0"
 
+        # Camera parameters
+        self.image_width = 640
+        self.fov = 120
+
     # ------------------------------------------------------------------ #
     #  CrowdNav interface                                                  #
     # ------------------------------------------------------------------ #
@@ -102,24 +106,16 @@ class LOVONCrowdPolicy(Policy):
     def load_lovon(self, model_path, tokenizer_path, social_nav_enabled=True):
         """
         Load the LOVON models. Call this after configure().
-
-        Args:
-            model_path      : path to L2MM model directory
-            tokenizer_path  : path to tokenizer directory
-            social_nav_enabled : whether to enable SocialNavigator
         """
         # --- L2MM ---------------------------------------------------------
-        # from models.api_language2mostion import MotionPredictor
-        # self.l2mm = MotionPredictor(
-        #     model_path=model_path,
-        #     tokenizer_path=tokenizer_path,
-        # )
+        from models.api_language2mostion import MotionPredictor
+        self.l2mm = MotionPredictor(
+            model_path=model_path,
+            tokenizer_path=tokenizer_path,
+        )
 
-        # --- SocialNavigator ---------------------------------------------
-        # from models.api_social_navigator import SocialNavigator
-        # self.social_nav = SocialNavigator(enabled=social_nav_enabled)
-
-        pass  # uncomment the above once paths are set
+        from models.api_social_navigator import SocialNavigator
+        self.social_nav = SocialNavigator(enabled=social_nav_enabled)
 
     def set_mission(self, instruction_0, instruction_1="", predicted_object="none"):
         """Set the language instruction for the current episode."""
@@ -136,12 +132,7 @@ class LOVONCrowdPolicy(Policy):
 
     def _build_l2mm_input(self, self_state, human_states):
         """
-        Translate CrowdNav ground-truth state into the dict that
-        MotionPredictor.predict() expects.
-
-        This is where you bridge the two representations.
-        CrowdNav gives metric world-frame positions; L2MM expects
-        language + normalised object detections. Adapt as needed.
+        takes CrowdNav states and creates input for L2MM
         """
         # Compute direction and distance to goal
         dx = self_state.gx - self_state.px
@@ -149,21 +140,25 @@ class LOVONCrowdPolicy(Policy):
         goal_dist = np.hypot(dx, dy)
         goal_angle = np.arctan2(dy, dx) - self_state.theta
 
-        # Placeholder: you'll need to decide how to map CrowdNav's
-        # state into the fields L2MM was trained on. For example,
-        # you could treat the goal as the "object" with a synthetic
-        # bounding box, or you could bypass L2MM entirely and only
-        # use SocialNavigator on top of a simpler goal-seeking policy.
+        # pinhole model of camera for angle to pixel
+        # whn is normalized size of bounding box
+        # xyn is normalized coords of centre of bounding box: [0.5, 0.5]
+        
+        x = 0.5 + np.tan(np.radians(goal_angle))/(2*np.tan(np.radians(self.fov/2)))
+        x = np.clip(x, 0.0, 1.0)
+
+
         l2mm_input = {
             "mission_instruction_0": self.mission_instruction_0,
             "mission_instruction_1": self.mission_instruction_1,
             "predicted_object": self.predicted_object,
             "confidence": [1.0],
-            "object_xyn": [np.clip(goal_angle / np.pi, -1, 1), 0.0],
+            "object_xyn": [x, 0.0],
             "object_whn": [0.1, 0.1],
             "mission_state_in": self.mission_state_in,
             "search_state_in": self.search_state_in,
         }
+        print(l2mm_input)
         return l2mm_input
 
     def _call_l2mm(self, l2mm_input):

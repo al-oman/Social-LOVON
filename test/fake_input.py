@@ -44,8 +44,8 @@ sample_input = {'mission_instruction_0': 'approach the bag at 0.5 m/',
                 'motion_vector': [0.5, 0, 0], 
                 'mission_state_in': 'running', 
                 'search_state_in': 'running',
-                "mission_state_out":"running",
-                "search_state_out":"running"}
+                "mission_state_out":"running",  # these aren't necessary
+                "search_state_out":"running"}   #
 
 # initial robot pose in world frame
 x, y, theta = 0.0, 0.0, 0.0  # theta in radians
@@ -80,6 +80,11 @@ for i in time_array:
     input["motion_vector"] = prediction["motion_vector"]
     input["mission_state_in"] = prediction["predicted_state"]
     input["search_state_in"] = prediction["search_state"]
+
+for state in states:
+    print(state)
+
+print(input)
 
 # simple plot
 plt.figure(figsize=(6,6))
