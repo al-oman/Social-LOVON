@@ -10,6 +10,8 @@ from crowd_nav.policy.policy_factory import policy_factory
 from crowd_sim.envs.utils.robot import Robot
 from crowd_sim.envs.policy.orca import ORCA
 
+from crowd_sim.envs.utils.action import ActionXY
+
 
 def main():
     parser = argparse.ArgumentParser('Parse configuration file')
@@ -91,7 +93,8 @@ def main():
         done = False
         last_pos = np.array(robot.get_position())
         while not done:
-            action = robot.act(ob)
+            # action = robot.act(ob)
+            action = ActionXY(vx=1, vy=1)
             print(action)
             ob, _, done, info = env.step(action)
             current_pos = np.array(robot.get_position())
