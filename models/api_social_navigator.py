@@ -574,7 +574,7 @@ class SocialNavigator:
         track["frames_lost"] = 0
 
     # ================================================================== #
-    #  STAGE 4 -- Trajectory prediction                                   #
+    #  STAGE 4 -- Trajectory prediction                                 #
     # ================================================================== #
 
     def _predict_trajectories(self):
@@ -649,17 +649,15 @@ class SocialNavigator:
     def _compute_safety_score(self):
         # type: () -> float
         """
-        Compute a single safety score in [0, 1].
+        Compute a safety score
 
-        Components
-        ----------
-        s_prox : 1 - h * exp(-d_min^2 / 2*sigma^2)
-            Penalises current proximity to nearest human.
-
-        s_traj : min predicted distance / d_safe
-            Penalises predicted future closeness.  Clamped to [0, 1].
-
-        Returns min(s_prox, s_traj) so the most dangerous signal wins.
+        s_gaussian: uses gaussians to build a sort of potential field (see: Victor's thesis)
+            
+            - s_traj:
+                Penalises predicted future closeness
+            - s_SFM:
+                penalized virtual repulsive 'force' from human agents
+            -
         """
         sigma = self.params["sigma"]
         h = self.params["h"]
@@ -720,21 +718,19 @@ class SocialNavigator:
     #  STAGE 7 -- Command correction (action shield)                       #
     #                                                                      #
     #  When shield_active:                                                 #
-    #    1. Brake: scale forward speed by (1 - k_brake * threat)           #
-    #    2. Repulse: add lateral velocity away from nearest human          #
+    #            v* = argmin_{v'}(|v' - v|)                                #
+    #          st: still in safe region + buffer/padding/safety_factor     #
     #  When shield_inactive: passthrough.                                  #
     # ================================================================== #
 
     def _correct_command(self, motion_vector):
         # type: (list) -> list
         """
-        Apply action-shield correction to the nominal L2MM command.
-
-        The original command is preserved as closely as possible;
-        corrections are the minimum needed to maintain safety.
+        v* = argmin_{v'}(|v' - v|)
+                st. still in safe region + buffer/padding/safety_factor
 
         Returns:
-            [v_x, v_y, omega_z]  -- corrected command.
+            [v_x', v_y', omega_z']  -- corrected motion vector
         """
         if not self.shield_active:
             return motion_vector
@@ -742,6 +738,7 @@ class SocialNavigator:
         vx, vy, omega = motion_vector[0], motion_vector[1], motion_vector[2]
 
         threat = 1.0 - self.safety_score          # 0 = safe, 1 = dangerous
+
         k_brake = self.params["k_brake"]
         k_repulse = self.params["k_repulse"]
         v_min = self.params["v_min_scale"]
