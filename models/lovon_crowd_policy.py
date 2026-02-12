@@ -20,6 +20,7 @@ Usage:
 import numpy as np
 from crowd_sim.envs.policy.policy import Policy
 from crowd_sim.envs.utils.action import ActionXY, ActionRot
+from models.safety import world_to_robot_frame, world_to_robot_frame_velocity
 
 
 class LOVONCrowdPolicy(Policy):
@@ -187,53 +188,55 @@ class LOVONCrowdPolicy(Policy):
 
     def _call_social_nav(self, motion_vector, self_state, human_states):
         """
-        Run the SocialNavigator's step() using ground-truth human positions
-        from CrowdNav, bypassing the perception/LiDAR pipeline.
+        Run the SocialNavigator using ground-truth human positions from CrowdNav.
+        Bypasses perception stages 1-3 by calling step_ground_truth().
         """
         if self.social_nav is None:
             return motion_vector
 
-        # Build a synthetic pose_state dict from ground-truth.
-        # SocialNavigator._parse_pose_state expects:
-        #   {"num_people": int, "poses": [...], "pose_boxes": [...]}
-        #
-        # Since we have ground-truth metric positions, a cleaner path is
-        # to directly populate SocialNavigator.tracked_humans and skip
-        # the perception stages. That's a one-time modification to
-        # SocialNavigator -- for now, pass the raw data through:
-        pose_state = self._humans_to_pose_state(self_state, human_states)
+        gt_humans = self._build_gt_humans(self_state, human_states)
 
-        motion_vector = self.social_nav.step(
+        motion_vector = self.social_nav.step_ground_truth(
             motion_vector=motion_vector,
-            pose_state=pose_state,
+            gt_humans=gt_humans,
             mission_state=self.mission_state_in,
-            lidar_ranges=None,
         )
         return motion_vector
 
-    def _humans_to_pose_state(self, self_state, human_states):
+    def _build_gt_humans(self, self_state, human_states):
         """
-        Convert CrowdNav human ObservableStates into the pose_state dict
-        that SocialNavigator expects.
+        Transform CrowdNav world-frame human states into robot-frame dicts
+        for SocialNavigator.step_ground_truth().
 
-        This is the main adaptation point. CrowdNav gives world-frame
-        (px, py, vx, vy, radius); SocialNavigator expects pixel-space
-        bounding boxes and optional keypoints.
+        For each human:
+          - Transform (px, py) to robot-frame [x_lateral, depth]
+          - Compute Euclidean distance
+          - Transform (vx, vy) to robot-frame velocity
 
-        Options:
-          A) Synthesise fake bounding boxes from world positions (quick hack).
-          B) Directly inject TrackedHuman objects into social_nav, bypassing
-             the perception pipeline (cleaner, recommended long-term).
+        Args:
+            self_state:   robot FullState (px, py, theta, ...)
+            human_states: list of ObservableState (px, py, vx, vy, radius)
+
+        Returns:
+            list of dicts: {track_id, position_rf, distance, velocity, radius}
         """
-        # Placeholder -- return empty so SocialNavigator sees no people
-        # and acts as passthrough. Fill this in with option A or B.
-
-        # for i, h in enumerate(human_states):
-        #     print(f"human {i}: p: ({h.px:.2f}, {h.py:.2f}), v: ({h.vx:.2f}, {h.vy:.2f}) radius: {h.radius:.2f}")
-
-        return {"num_people": len(human_states), 
-                "poses": [], 
-                "pose_boxes": []}
+        gt_humans = []
+        for i, h in enumerate(human_states):
+            x_lat, depth = world_to_robot_frame(
+                h.px, h.py, self_state.px, self_state.py, self_state.theta
+            )
+            distance = np.hypot(h.px - self_state.px, h.py - self_state.py)
+            vx_lat, v_depth = world_to_robot_frame_velocity(
+                h.vx, h.vy, self_state.theta
+            )
+            gt_humans.append({
+                "track_id": i,
+                "position_rf": [x_lat, depth],
+                "distance": float(distance),
+                "velocity": [vx_lat, v_depth],
+                "radius": h.radius,
+            })
+        return gt_humans
 
     def _angle_to_xyn_whn(self, self_state):
         # Compute direction and distance to goal
@@ -264,8 +267,6 @@ class LOVONCrowdPolicy(Policy):
 
 
         return xyn, whn
-
-
 
 
     def _to_action(self, motion_vector, self_state):

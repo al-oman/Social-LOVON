@@ -16,6 +16,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
+from models.safety import aggregate_safety_score, trajectory_safety_score
 
 logger = logging.getLogger("SocialNavigator")
 logger.setLevel(logging.DEBUG)
@@ -90,7 +91,7 @@ class SocialNavigator:
         "beta_traj": 0.3,
         "d_safe": 0.8,
         "d_max": 2.5,
-        # --- Action shield ---
+        # --- Action shield  params ---
         "shield_thresh": 0.5,       # safety score below this → shield activates
         "shield_active_states": ["running"],  # mission states where shield is armed
         "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
@@ -98,8 +99,8 @@ class SocialNavigator:
         "v_min_scale": 0.1,         # minimum forward speed scale when braking
         "horizon_s": 2.0,
         "horizon_steps": 10,
-        "mono_k": 300.0,       # placeholder: d approx mono_k / bbox_height_px
-        # --- Camera intrinsics (Go2 front camera, 120deg FoV) ---
+        "mono_k": 300.0,
+        # --- Camera params  ---
         "image_width": 640,
         "fov_deg": 120.0,
         # --- Trajectory prediction ---
@@ -153,6 +154,7 @@ class SocialNavigator:
         self._motion_original = None
         self._motion_modulated = None
         self._lidar_ranges = None
+        self._robot_predicted_path = None  # list of [x, y] in robot frame
 
         # --- Diagnostics ---
         self.diag = {
@@ -227,6 +229,98 @@ class SocialNavigator:
         self._update_diagnostics()
 
         return modified_vector
+
+    def step_ground_truth(self, motion_vector, gt_humans, mission_state):
+        """
+        Entry point for ground-truth human data (e.g. from CrowdNav simulator).
+
+        Bypasses perception stages 1-3 (detection, distance estimation, tracking)
+        and directly populates _tracked_humans from pre-computed robot-frame data.
+        Then runs stages 4-8 as normal.
+
+        Args:
+            motion_vector: [v_x, v_y, omega_z] from L2MM
+            gt_humans:     list of dicts, each with keys:
+                             track_id:     int
+                             position_rf:  [x_lateral, depth] in robot frame
+                             distance:     float meters
+                             velocity:     [vx_lateral, v_depth] in robot frame
+                             radius:       float meters
+            mission_state: str, current state machine state
+
+        Returns:
+            motion_vector: [v_x, v_y, omega_z] (possibly corrected)
+        """
+        if not self.enabled:
+            return motion_vector
+
+        self._frame_count += 1
+        self._lidar_ranges = None
+
+        # --- Directly populate _tracked_humans (bypass stages 1-3) ---
+        self._tracked_humans.clear()
+        for gh in gt_humans:
+            tid = gh["track_id"]
+            human = TrackedHuman(track_id=tid)
+            human.position_rf = gh["position_rf"]
+            human.distance = gh["distance"]
+            human.velocity = gh.get("velocity")
+            human.confidence = 1.0
+            human.last_seen = time.time()
+            self._tracked_humans[tid] = human
+
+        # --- Cache robot predicted path for safety scoring + BEV ---
+        self._robot_predicted_path = self._extrapolate_robot_path(motion_vector)
+
+        # 4. Predict future trajectories
+        self._predict_trajectories()
+
+        # 5. Compute safety score
+        self.safety_score = self._compute_safety_score()
+
+        # 6. Shield gate
+        self.shield_active = self._evaluate_shield(mission_state)
+
+        # 7. Command correction
+        modified_vector = self._correct_command(motion_vector)
+
+        # Store both for BEV visualisation
+        self._motion_original = list(motion_vector)
+        self._motion_modulated = list(modified_vector)
+
+        # 8. Update diagnostics
+        self._update_diagnostics()
+
+        return modified_vector
+
+    def _extrapolate_robot_path(self, motion_vector):
+        """
+        Extrapolate the robot's future path from its current motion vector.
+
+        Uses the same unicycle integration as draw_bev lines 885-906.
+        Returns a list of [x, y] positions in robot frame (robot starts at origin).
+
+        Args:
+            motion_vector: [v_forward, v_lateral, omega_z]
+
+        Returns:
+            list of [x, y] points in robot frame
+        """
+        horizon = self.params["horizon_s"]
+        steps = self.params["horizon_steps"]
+        if steps <= 0:
+            return []
+        dt = horizon / steps
+
+        v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
+        x, y, theta = 0.0, 0.0, 0.0
+        path = []
+        for _ in range(steps):
+            x += (-v_forward * math.sin(theta) - v_lateral * math.cos(theta)) * dt
+            y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
+            theta += omega * dt
+            path.append([x, y])
+        return path
 
     # ================================================================== #
     #  STAGE 1 -- Parse pose_state into detection dicts                   #
@@ -649,43 +743,39 @@ class SocialNavigator:
     def _compute_safety_score(self):
         # type: () -> float
         """
-        Compute a safety score
+        Compute a safety score combining proximity and trajectory threat.
 
-        s_gaussian: uses gaussians to build a sort of potential field (see: Victor's thesis)
-            
-            - s_traj:
-                Penalises predicted future closeness
-            - s_SFM:
-                penalized virtual repulsive 'force' from human agents
-            -
+        Two components combined via min():
+          s_prox  - Gaussian proximity to closest human (current positions)
+          s_traj  - minimum predicted future distance over horizon
+
+        Uses shared functions from models.safety.
         """
         sigma = self.params["sigma"]
         h = self.params["h"]
-        d_safe = self.params["d_safe"]
 
         if not self._tracked_humans:
             return 1.0
 
-        # ---- s_prox: current proximity ----
+        # ---- s_prox: current proximity (via shared safety function) ----
         distances = [
             human.distance for human in self._tracked_humans.values()
             if human.distance is not None
         ]
-        if distances:
-            d_min = min(distances)
-            s_prox = 1.0 - h * math.exp(-(d_min ** 2) / (2.0 * sigma ** 2))
-        else:
-            s_prox = 1.0
+        s_prox = aggregate_safety_score(distances, sigma=sigma, h=h)
 
         # ---- s_traj: predicted future proximity ----
-        # TODO: for each human, scan predicted_path to find the minimum
-        #       distance to the robot's own extrapolated path (or origin
-        #       as a first approximation).  Clamp to [0, 1].
-        s_traj = 1.0  # placeholder -- implement trajectory threat here
-
-        # ---- human awareness level ----
-        # see if detected human is facing quadruped
-        # less safe if human does not see the quadruped
+        robot_path = self._robot_predicted_path
+        if robot_path:
+            human_paths = {}
+            for human in self._tracked_humans.values():
+                if human.predicted_path:
+                    human_paths[human.track_id] = human.predicted_path
+            s_traj = trajectory_safety_score(
+                robot_path, human_paths, sigma=sigma, h=h
+            )
+        else:
+            s_traj = 1.0
 
         score = min(s_prox, s_traj)
         score = max(0.0, min(1.0, score))
@@ -695,12 +785,6 @@ class SocialNavigator:
 
     # ================================================================== #
     #  STAGE 6 -- Shield gate                                              #
-    #                                                                      #
-    #  The shield activates when BOTH conditions hold:                     #
-    #    1. safety_score < shield_thresh                                   #
-    #    2. mission_state is in shield_active_states (e.g. "running")      #
-    #                                                                      #
-    #  When the shield is inactive the command passes through untouched.   #
     # ================================================================== #
 
     def _evaluate_shield(self, mission_state):
@@ -716,19 +800,16 @@ class SocialNavigator:
 
     # ================================================================== #
     #  STAGE 7 -- Command correction (action shield)                       #
-    #                                                                      #
-    #  When shield_active:                                                 #
-    #            v* = argmin_{v'}(|v' - v|)                                #
-    #          st: still in safe region + buffer/padding/safety_factor     #
-    #  When shield_inactive: passthrough.                                  #
     # ================================================================== #
 
     def _correct_command(self, motion_vector):
         # type: (list) -> list
         """
-        v* = argmin_{v'}(|v' - v|)
-                st. still in safe region + buffer/padding/safety_factor
-
+        when shield active:
+            v* = argmin_{v'}(|v' - v|)
+                    st. still in safe region + buffer/padding/safety_factor
+        else:
+            passthrough
         Returns:
             [v_x', v_y', omega_z']  -- corrected motion vector
         """
@@ -738,10 +819,6 @@ class SocialNavigator:
         vx, vy, omega = motion_vector[0], motion_vector[1], motion_vector[2]
 
         threat = 1.0 - self.safety_score          # 0 = safe, 1 = dangerous
-
-        k_brake = self.params["k_brake"]
-        k_repulse = self.params["k_repulse"]
-        v_min = self.params["v_min_scale"]
 
         # ---- PLACEHOLDER LOGIC ----
         vy_correction = 0
@@ -882,24 +959,17 @@ class SocialNavigator:
                      _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
         # Robot motion-vector curves
-        horizon = self.params["horizon_s"]
-        dt = 0.05
-        steps = int(horizon / dt)
         for vec, color in [
             (self._motion_original,  (255, 255, 0)),   # cyan  (BGR) = original
             (self._motion_modulated, (0, 255, 255)),    # yellow (BGR) = modulated
         ]:
             if vec is None:
                 continue
-            v_forward, v_lateral, omega = vec[0], vec[1], vec[2]
-            x, y, theta = 0.0, 0.0, 0.0
+            path = self._extrapolate_robot_path(vec)
             prev = (rcx, rcy)
-            for _ in range(steps):
-                x += (-v_forward * math.sin(theta) - v_lateral * math.cos(theta)) * dt
-                y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
-                theta += omega * dt
-                px = int(rcx + x * scale)
-                py = int(rcy - y * scale)
+            for pt in path:
+                px = int(rcx + pt[0] * scale)
+                py = int(rcy - pt[1] * scale)
                 if not (x0 <= px <= x0 + sz and y0 <= py <= y0 + sz):
                     break
                 _cv2.line(image, prev, (px, py), color, 2, _cv2.LINE_AA)
