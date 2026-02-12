@@ -52,6 +52,8 @@ class LOVONCrowdPolicy(Policy):
         self.image_width = 640
         self.fov = 120
 
+        self.goal_radius = 0.1
+
     # ------------------------------------------------------------------ #
     #  CrowdNav interface                                                  #
     # ------------------------------------------------------------------ #
@@ -96,6 +98,15 @@ class LOVONCrowdPolicy(Policy):
             motion_vector, self_state, human_states
         )
 
+        # --- debug: inspect L2MM behavior near goal ---
+        xyn, whn = self._angle_to_xyn_whn(self_state)
+        dx = self_state.gx - self_state.px
+        dy = self_state.gy - self_state.py
+        goal_dist = np.hypot(dx, dy)
+        print(f"robot=({self_state.px:.2f},{self_state.py:.2f}) theta={self_state.theta:.2f} "
+              f"dist={goal_dist:.2f} xyn={xyn[0]:.3f} whn={whn[0]:.2f} "
+              f"state={self.mission_state_in} mv=[{motion_vector[0]:.3f},{motion_vector[1]:.3f},{motion_vector[2]:.3f}]")
+
         # --- 4. Convert to CrowdNav action -------------------------------
         return self._to_action(motion_vector, self_state)
 
@@ -134,31 +145,31 @@ class LOVONCrowdPolicy(Policy):
         """
         takes CrowdNav states and creates input for L2MM
         """
-        # Compute direction and distance to goal
-        dx = self_state.gx - self_state.px
-        dy = self_state.gy - self_state.py
-        goal_dist = np.hypot(dx, dy)
-        goal_angle = np.arctan2(dy, dx) - self_state.theta
+        # # Compute direction and distance to goal
+        # dx = self_state.gx - self_state.px
+        # dy = self_state.gy - self_state.py
+        # goal_dist = np.hypot(dx, dy)
+        # goal_angle = np.arctan2(dy, dx) - self_state.theta
 
-        # pinhole model of camera for angle to pixel
-        # whn is normalized size of bounding box
-        # xyn is normalized coords of centre of bounding box: [0.5, 0.5]
-        
-        x = 0.5 + np.tan(np.radians(goal_angle))/(2*np.tan(np.radians(self.fov/2)))
-        x = np.clip(x, 0.0, 1.0)
+        # # pinhole model of camera for angle to pixel
+        # # whn is normalized size of bounding box
+        # # xyn is normalized coords of centre of bounding box: [0.5, 0.5]
 
+        # x = 0.5 + np.tan(np.radians(goal_angle))/(2*np.tan(np.radians(self.fov/2)))
+        # x = np.clip(x, 0.0, 1.0)
+
+        xyn, whn = self._angle_to_xyn_whn(self_state)
 
         l2mm_input = {
             "mission_instruction_0": self.mission_instruction_0,
             "mission_instruction_1": self.mission_instruction_1,
             "predicted_object": self.predicted_object,
             "confidence": [1.0],
-            "object_xyn": [x, 0.0],
-            "object_whn": [0.1, 0.1],
+            "object_xyn": xyn,
+            "object_whn": whn,
             "mission_state_in": self.mission_state_in,
             "search_state_in": self.search_state_in,
         }
-        print(l2mm_input)
         return l2mm_input
 
     def _call_l2mm(self, l2mm_input):
@@ -216,7 +227,46 @@ class LOVONCrowdPolicy(Policy):
         """
         # Placeholder -- return empty so SocialNavigator sees no people
         # and acts as passthrough. Fill this in with option A or B.
-        return {"num_people": 0, "poses": [], "pose_boxes": []}
+
+        # for i, h in enumerate(human_states):
+        #     print(f"human {i}: p: ({h.px:.2f}, {h.py:.2f}), v: ({h.vx:.2f}, {h.vy:.2f}) radius: {h.radius:.2f}")
+
+        return {"num_people": len(human_states), 
+                "poses": [], 
+                "pose_boxes": []}
+
+    def _angle_to_xyn_whn(self, self_state):
+        # Compute direction and distance to goal
+        dx = self_state.gx - self_state.px
+        dy = self_state.gy - self_state.py
+        goal_dist = np.hypot(dx, dy)
+        goal_angle = np.arctan2(dy, dx) - self_state.theta
+        goal_angle = (goal_angle + np.pi) % (2 * np.pi) - np.pi  # wrap to [-pi, pi]
+
+        # clamp to FOV so pinhole model stays valid
+        # (goal behind/beside robot gets pushed to image edge)
+        half_fov = np.radians(self.fov / 2)
+        goal_angle = np.clip(goal_angle, -half_fov, half_fov)
+
+        # pinhole model of camera for angle to pixel
+        # whn is normalized size of bounding box
+        # xyn is normalized coords of centre of bounding box: [0.5, 0.5]
+
+        x = 0.5 - np.tan(goal_angle) / (2 * np.tan(half_fov))
+        xyn = [np.clip(x, 0.0, 1.0), 0.5]
+
+        # placeholder logic for bounding box size prediction from sim state
+        if goal_dist < self.goal_radius:
+            print('else')
+            whn = [0.4, 0.4]
+        else:
+            whn = [0.1, 0.1] 
+
+
+        return xyn, whn
+
+
+
 
     def _to_action(self, motion_vector, self_state):
         """
@@ -228,6 +278,8 @@ class LOVONCrowdPolicy(Policy):
             return ActionXY(vx=vx, vy=vy)
         else:
             # unicycle: (speed, rotation)
+            # L2MM outputs omega_z as rad/s, but ActionRot.r is angle-per-step
             speed = np.hypot(vx, vy)
             speed = min(speed, self_state.v_pref)
-            return ActionRot(v=speed, r=omega_z)
+            r = omega_z * self.time_step
+            return ActionRot(v=speed, r=r)
