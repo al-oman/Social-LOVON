@@ -59,6 +59,7 @@ def _trajectory_term(point_x, point_y, human_predicted_paths, sigma=SIGMA, h=H):
     if not human_predicted_paths:
         return 1.0
 
+    safety = 1.0
     for _tid, path in human_predicted_paths.items():
         for (fx, fy) in path:
             dist = math.sqrt((point_x - fx) ** 2 + (point_y - fy) ** 2)
