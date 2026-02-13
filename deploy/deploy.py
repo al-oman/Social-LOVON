@@ -781,8 +781,6 @@ class VisualLanguageController:
             "pose_boxes": pose_boxes
         })
 
-
-
     def _update_motion_control(self, state):
         """Update Motion Control Parameters Based on Detection Results"""
         input_data = {

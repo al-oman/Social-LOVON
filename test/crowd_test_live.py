@@ -1,3 +1,11 @@
+"""
+Live-visualization variant of crowd_test.py.
+
+Renders the simulation in real time using plt.ion() so the plot updates
+each timestep while policy.predict() runs, rather than recording all
+states first and replaying afterward.
+"""
+
 import sys
 import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -10,6 +18,10 @@ import configparser
 import torch
 import numpy as np
 import gym
+import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
+from matplotlib import patches
+
 from crowd_nav.utils.explorer import Explorer
 from crowd_nav.policy.policy_factory import policy_factory
 from crowd_sim.envs.utils.robot import Robot
@@ -18,42 +30,79 @@ from crowd_sim.envs.policy.orca import ORCA
 from models.lovon_crowd_policy import LOVONCrowdPolicy
 from models.safety import compute_safety_grid
 
-# register LOVON policy in the factory
 policy_factory['lovon'] = LOVONCrowdPolicy
 
-def display_config(env_config, env_config_file, policy_config, policy_config_file):
-    print("\n" + "="*80)
-    print("POLICY CONFIG FILE:", os.path.abspath(policy_config_file))
-    print("="*80)
-    for section in policy_config.sections():
-        print(f"\n[{section}]")
-        for key, value in policy_config.items(section):
-            print(f"{key} = {value}")
 
-    print("\n" + "="*80)
-    print("ENV CONFIG FILE:", os.path.abspath(env_config_file))
-    print("="*80)
-    for section in env_config.sections():
-        print(f"\n[{section}]")
-        for key, value in env_config.items(section):
-            print(f"{key} = {value}")
-    print("="*80 + "\n")
+def draw_frame(ax, env, robot, action, step_num, safety_heatmap, heatmap_img):
+    """
+    Redraw a single simulation frame on the given axes.
+    Updates artists in-place where possible to avoid full redraws.
+    """
+    ax.cla()
+    ax.set_xlim(-6, 6)
+    ax.set_ylim(-6, 6)
+    ax.set_xlabel('x(m)', fontsize=12)
+    ax.set_ylabel('y(m)', fontsize=12)
+
+    cmap = plt.cm.get_cmap('hsv', 10)
+    arrow_style = patches.ArrowStyle("->", head_length=4, head_width=2)
+
+    # safety heatmap
+    if safety_heatmap and env.safety_calculator is not None:
+        human_states = [h.get_full_state() for h in env.humans]
+        safety_grid, extent = env.safety_calculator(human_states, xlim=(-6, 6), ylim=(-6, 6))
+        ax.imshow(safety_grid, extent=extent, origin='lower',
+                  cmap='RdYlGn', vmin=0, vmax=1, alpha=0.5, zorder=0)
+
+    # goal marker
+    goal = mlines.Line2D([robot.gx], [robot.gy], color='red', marker='*',
+                         linestyle='None', markersize=15, label='Goal')
+    ax.add_artist(goal)
+
+    # robot
+    robot_circle = plt.Circle(robot.get_position(), robot.radius,
+                              fill=True, color='yellow', zorder=3)
+    ax.add_artist(robot_circle)
+
+    # robot heading arrow
+    r = robot.radius
+    theta = robot.theta
+    arrow = patches.FancyArrowPatch(
+        (robot.px, robot.py),
+        (robot.px + r * np.cos(theta), robot.py + r * np.sin(theta)),
+        color='red', arrowstyle=arrow_style, zorder=4)
+    ax.add_artist(arrow)
+
+    # humans
+    for i, human in enumerate(env.humans):
+        hc = plt.Circle(human.get_position(), human.radius,
+                        fill=False, color=cmap(i), zorder=2)
+        ax.add_artist(hc)
+        ax.text(human.px - 0.11, human.py - 0.11, str(i),
+                color='black', fontsize=12, zorder=5)
+
+    # time + status
+    ax.text(-1, 5.5, f'Time: {env.global_time:.2f}', fontsize=14)
+    if action is not None:
+        ax.text(2, 5.5, f'Step: {step_num}', fontsize=12)
+
+    ax.legend([robot_circle, goal], ['Robot', 'Goal'], fontsize=12, loc='upper left')
+
+    return heatmap_img
+
 
 def main():
-    parser = argparse.ArgumentParser('Parse configuration file')
+    parser = argparse.ArgumentParser('Live-visualization crowd test')
     parser.add_argument('--env_config', type=str, default='configs/env_lovon.config')
     parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config')
     parser.add_argument('--policy', type=str, default='orca')
     parser.add_argument('--model_dir', type=str, default=None)
     parser.add_argument('--il', default=False, action='store_true')
     parser.add_argument('--gpu', default=False, action='store_true')
-    parser.add_argument('--visualize', default=False, action='store_true')
     parser.add_argument('--phase', type=str, default='test')
     parser.add_argument('--test_case', type=int, default=None)
     parser.add_argument('--square', default=False, action='store_true')
     parser.add_argument('--circle', default=False, action='store_true')
-    parser.add_argument('--video_file', type=str, default=None)
-    parser.add_argument('--traj', default=False, action='store_true')
     parser.add_argument('--safety_heatmap', default=False, action='store_true')
     parser.add_argument('--goal', type=str, default='run to bag at 1.0 m/s')
     args = parser.parse_args()
@@ -72,7 +121,6 @@ def main():
         env_config_file = args.env_config
         policy_config_file = args.policy_config
 
-    # configure logging and device
     logging.basicConfig(level=logging.INFO, format='%(asctime)s, %(levelname)s: %(message)s',
                         datefmt="%Y-%m-%d %H:%M:%S")
     device = torch.device("cuda:0" if torch.cuda.is_available() and args.gpu else "cpu")
@@ -84,16 +132,13 @@ def main():
     policy_config.read(policy_config_file)
     policy.configure(policy_config)
 
-    # LOVON-specific setup
     if args.policy == 'lovon':
         policy.load_lovon(
             model_path="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success",
             tokenizer_path="models/tokenizer_language2motion_n1000000",
             social_nav_enabled=True,
         )
-        policy.set_mission(args.goal,
-                           args.goal, 
-                           "handbag")
+        policy.set_mission(args.goal, args.goal, "handbag")
 
     if policy.trainable:
         if args.model_dir is None:
@@ -106,8 +151,6 @@ def main():
     env = gym.make('CrowdSim-v0')
     env.configure(env_config)
 
-    # Inject shared safety calculator so heatmap uses models.safety math
-    # All safety parameters (resolution, sigma, h) are owned by Social-LOVON
     def _safety_calculator(human_states, xlim, ylim):
         human_positions = [(h.px, h.py) for h in human_states]
         return compute_safety_grid(human_positions, xlim, ylim)
@@ -120,45 +163,55 @@ def main():
     robot = Robot(env_config, 'robot')
     robot.set_policy(policy)
     env.set_robot(robot)
-    explorer = Explorer(env, robot, device, gamma=0.9)
-
-    # Display experiment information
-    display_config(env_config, env_config_file, policy_config, policy_config_file)
 
     policy.set_phase(args.phase)
     policy.set_device(device)
-    # set safety space for ORCA in non-cooperative simulation
     if isinstance(robot.policy, ORCA):
-        if robot.visible:
-            robot.policy.safety_space = 0
-        else:
-            robot.policy.safety_space = 0
+        robot.policy.safety_space = 0
         logging.info('ORCA agent buffer: %f', robot.policy.safety_space)
-
     policy.set_env(env)
     robot.print_info()
-    if args.visualize:
-        ob = env.reset(args.phase, args.test_case)
-        done = False
-        last_pos = np.array(robot.get_position())
-        while not done:
-            action = robot.act(ob)
-            print(action)
-            ob, _, done, info = env.step(action)
-            current_pos = np.array(robot.get_position())
-            logging.debug('Speed: %.2f', np.linalg.norm(current_pos - last_pos) / robot.time_step)
-            last_pos = current_pos
-        if args.traj:
-            env.render('traj', args.video_file)
-        else:
-            env.render('video', args.video_file, safety_heatmap=args.safety_heatmap)
 
-        logging.info('It takes %.2f seconds to finish. Final status is %s', env.global_time, info)
-        if robot.visible and info == 'reach goal':
-            human_times = env.get_human_times()
-            logging.info('Average time for humans to reach goal: %.2f', sum(human_times) / len(human_times))
-    else:
-        explorer.run_k_episodes(env.case_size[args.phase], args.phase, print_failure=True)
+    # --- live visualization loop ---
+    plt.ion()
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    ob = env.reset(args.phase, args.test_case)
+    done = False
+    step_num = 0
+    heatmap_img = None
+
+    # draw initial state before first action
+    heatmap_img = draw_frame(ax, env, robot, None, step_num,
+                             args.safety_heatmap, heatmap_img)
+    fig.canvas.draw()
+    fig.canvas.flush_events()
+    plt.pause(0.5)
+
+    while not done:
+        # compute action (this is where L2MM + social nav runs)
+        action = robot.act(ob)
+        print(action)
+        ob, _, done, info = env.step(action)
+        step_num += 1
+
+        # redraw with updated positions
+        heatmap_img = draw_frame(ax, env, robot, action, step_num,
+                                 args.safety_heatmap, heatmap_img)
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        plt.pause(0.001)
+
+    logging.info('It takes %.2f seconds to finish. Final status is %s',
+                 env.global_time, info)
+    if robot.visible and info == 'reach goal':
+        human_times = env.get_human_times()
+        logging.info('Average time for humans to reach goal: %.2f',
+                     sum(human_times) / len(human_times))
+
+    # keep window open until closed
+    plt.ioff()
+    plt.show()
 
 
 if __name__ == '__main__':
