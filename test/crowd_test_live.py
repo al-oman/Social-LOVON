@@ -22,13 +22,11 @@ import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 from matplotlib import patches
 
-from crowd_nav.utils.explorer import Explorer
 from crowd_nav.policy.policy_factory import policy_factory
 from crowd_sim.envs.utils.robot import Robot
 from crowd_sim.envs.policy.orca import ORCA
 
 from models.lovon_crowd_policy import LOVONCrowdPolicy
-from models.safety import compute_safety_grid
 
 policy_factory['lovon'] = LOVONCrowdPolicy
 
@@ -47,12 +45,15 @@ def draw_frame(ax, env, robot, action, step_num, safety_heatmap, heatmap_img):
     cmap = plt.cm.get_cmap('hsv', 10)
     arrow_style = patches.ArrowStyle("->", head_length=4, head_width=2)
 
-    # safety heatmap
-    if safety_heatmap and env.safety_calculator is not None:
-        human_states = [h.get_full_state() for h in env.humans]
-        safety_grid, extent = env.safety_calculator(human_states, xlim=(-6, 6), ylim=(-6, 6))
-        ax.imshow(safety_grid, extent=extent, origin='lower',
-                  cmap='RdYlGn', vmin=0, vmax=1, alpha=0.5, zorder=0)
+    # safety heatmap via social_nav (same method deploy.py uses)
+    if safety_heatmap:
+        social_nav = getattr(robot.policy, 'social_nav', None)
+        if social_nav is not None:
+            safety_grid, extent = social_nav.get_safety_heatmap(
+                xlim=(-6, 6), ylim=(-6, 6))
+            if safety_grid is not None:
+                ax.imshow(safety_grid, extent=extent, origin='lower',
+                          cmap='RdYlGn', vmin=0, vmax=1, alpha=0.5, zorder=0)
 
     # goal marker
     goal = mlines.Line2D([robot.gx], [robot.gy], color='red', marker='*',
@@ -150,11 +151,6 @@ def main():
     env_config.read(env_config_file)
     env = gym.make('CrowdSim-v0')
     env.configure(env_config)
-
-    def _safety_calculator(human_states, xlim, ylim):
-        human_positions = [(h.px, h.py) for h in human_states]
-        return compute_safety_grid(human_positions, xlim, ylim)
-    env.safety_calculator = _safety_calculator
 
     if args.square:
         env.test_sim = 'square_crossing'

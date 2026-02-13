@@ -894,7 +894,7 @@ class VisualLanguageController:
 
         # Draw Birds-eye view mini-map
         if hasattr(self, 'social_nav') and self.social_nav.enabled:
-            image = self.social_nav.draw_bev(image)
+            image = self.social_nav.draw_bev(image, show_heatmap=True)
 
         # Draw status information with black background
         texts = [

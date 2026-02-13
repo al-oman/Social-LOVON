@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
-from models.safety import robot_safety_score
+from models.safety import robot_safety_score, compute_safety_grid
 
 logger = logging.getLogger("SocialNavigator")
 logger.setLevel(logging.DEBUG)
@@ -841,7 +841,7 @@ class SocialNavigator:
     # ================================================================== #
 
     # Draw birds-eye view minimap
-    def draw_bev(self, image):
+    def draw_bev(self, image, show_heatmap=False):
         """Draw bird's-eye-view mini-map on bottom-right of image."""
         import cv2 as _cv2
 
@@ -867,6 +867,27 @@ class SocialNavigator:
         image[y0:y0+sz, x0:x0+sz] = (
             image[y0:y0+sz, x0:x0+sz].astype(np.float32) * 0.3
         ).astype(np.uint8)
+
+        # Safety heatmap underlay
+        if show_heatmap and has_humans:
+            grid, extent = self.get_safety_heatmap(
+                xlim=(-bev_range / 2, bev_range / 2),
+                ylim=(0, bev_range),
+                resolution=bev_range / 50,
+            )
+            if grid is not None:
+                import matplotlib
+                matplotlib.use('Agg')
+                cmap_fn = matplotlib.cm.get_cmap('RdYlGn')
+                rgba = cmap_fn(grid)[:, :, :3]  # drop alpha, shape (ny, nx, 3)
+                hm_bgr = (rgba[:, :, ::-1] * 255).astype(np.uint8)  # RGB→BGR
+                hm_bgr = _cv2.resize(hm_bgr, (sz, sz), interpolation=_cv2.INTER_NEAREST)
+                # flip vertically so depth=0 is at bottom
+                hm_bgr = _cv2.flip(hm_bgr, 0)
+                # blend with darkened background
+                roi = image[y0:y0+sz, x0:x0+sz]
+                _cv2.addWeighted(hm_bgr, 0.5, roi, 0.5, 0, roi)
+
         _cv2.rectangle(image, (x0, y0), (x0 + sz, y0 + sz), (255, 255, 255), 1)
 
         # Robot at bottom-center
@@ -980,3 +1001,51 @@ class SocialNavigator:
                         _cv2.circle(image, (tx, ty), 4, (0, 165, 255), -1)
 
         return image
+
+    # ================================================================== #
+    #  Safety heatmap (shared by deploy + simulation)                     #
+    # ================================================================== #
+
+    def get_safety_heatmap(self, xlim=(-5, 5), ylim=(-5, 5), resolution=0.2):
+        """
+        Compute a 2D safety heatmap from the currently tracked humans.
+
+        Works identically for both paths:
+          - deploy:  _tracked_humans filled by step()  (perception)
+          - sim:     _tracked_humans filled by step_ground_truth()
+
+        All coordinates are in robot frame (robot at origin).
+
+        Args:
+            xlim: (xmin, xmax) lateral bounds in meters
+            ylim: (ymin, ymax) depth bounds in meters
+            resolution: grid cell size in meters
+
+        Returns:
+            safety_grid: 2D numpy array, values in [0, 1]
+            extent:      [xmin, xmax, ymin, ymax] for imshow
+            Returns (None, None) if no humans are tracked.
+        """
+        if not self._tracked_humans:
+            return None, None
+
+        human_positions = [
+            tuple(h.position_rf)
+            for h in self._tracked_humans.values()
+            if h.position_rf is not None
+        ]
+        if not human_positions:
+            return None, None
+
+        human_predicted_paths = {
+            h.track_id: h.predicted_path
+            for h in self._tracked_humans.values()
+            if h.predicted_path
+        }
+
+        grid, extent = compute_safety_grid(
+            human_positions, xlim, ylim,
+            resolution=resolution,
+            human_predicted_paths=human_predicted_paths or None,
+        )
+        return grid, extent
