@@ -5,7 +5,7 @@ LOVON Policy for CrowdNav
 
 import numpy as np
 from crowd_sim.envs.policy.policy import Policy
-from crowd_sim.envs.utils.action import ActionXY, ActionRot
+from crowd_sim.envs.utils.action import ActionXY, ActionRot, ActionXYRot
 
 
 class LOVONCrowdPolicy(Policy):
@@ -13,14 +13,14 @@ class LOVONCrowdPolicy(Policy):
     CrowdNav Policy that delegates to LOVON's L2MM + SocialNavigator.
 
     Receives a JointState (robot FullState + list of human ObservableStates)
-    and returns an ActionXY or ActionRot.
+    and returns an ActionXYRot (or ActionXY / ActionRot for legacy kinematics).
     """
 
     def __init__(self):
         super().__init__()
         self.trainable = False
         self.multiagent_training = True
-        self.kinematics = "unicycle"  # or "holonomic" -- set in configure()
+        self.kinematics = "unicycle_xyrot"  # or "holonomic", "unicycle" -- set in configure()
         self.name = "lovon"
 
         # LOVON components (loaded later)
@@ -64,8 +64,9 @@ class LOVONCrowdPolicy(Policy):
             state.human_states: [ObservableState(px, py, vx, vy, radius), ...]
 
         Returns:
-            ActionXY(vx, vy)  if self.kinematics == "holonomic"
-            ActionRot(v, r)   if self.kinematics == "unicycle"
+            ActionXYRot(vx, vy, wz) if self.kinematics == "unicycle_xyrot"
+            ActionXY(vx, vy)        if self.kinematics == "holonomic"
+            ActionRot(v, r)         if self.kinematics == "unicycle"
         """
         self_state = state.self_state
         human_states = state.human_states
@@ -246,7 +247,9 @@ class LOVONCrowdPolicy(Policy):
         """
         vx, vy, omega_z = motion_vector
 
-        if self.kinematics == "holonomic":
+        if self.kinematics == "unicycle_xyrot":
+            return ActionXYRot(vx=vx, vy=vy, wz=omega_z)
+        elif self.kinematics == "holonomic":
             return ActionXY(vx=vx, vy=vy)
         else:
             # unicycle: (speed, rotation)
