@@ -86,7 +86,14 @@ class LiDARGetterThread(threading.Thread):
             now = time.time()
             if now - self.freq_start >= 1.0:
                 freq = self.freq_count / (now - self.freq_start)
-                print(f"[LiDARGetter] Frequency: {freq:.2f} Hz")
+                # Diagnostic: log field names, point count, and value ranges
+                fields = list(cloud.keys())
+                n_pts = len(next(iter(cloud.values()))) if cloud else 0
+                diag = f"[LiDARGetter] {freq:.1f} Hz | {n_pts} pts | fields={fields}"
+                for k, v in cloud.items():
+                    if len(v) > 0:
+                        diag += f" | {k}:[{v.min():.2f}, {v.max():.2f}]"
+                print(diag)
                 with self.controller.freq_lock:
                     self.controller.lidar_getter_freq = freq
                 self.freq_start = now

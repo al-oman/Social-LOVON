@@ -19,7 +19,7 @@ from models.humantrajectorypredictor import HumanTrajectoryPredictor
 from models.safety import robot_safety_score, compute_safety_grid
 
 logger = logging.getLogger("SocialNavigator")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 if not logger.handlers:
     _handler = logging.StreamHandler()
     _handler.setFormatter(logging.Formatter(
@@ -120,8 +120,8 @@ class SocialNavigator:
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
         # --- BEV minimap display ---
         "bev_range_m": 5.0,            # visible range in BEV (meters), independent of d_max
-        "bev_z_min": 0.0,             # BEV display Z filter min (sensor-relative)
-        "bev_z_max": 0.1,             # BEV display Z filter max (tight band = clean slice)
+        "bev_z_min": 0.0,            # BEV display Z filter min (sensor-relative)
+        "bev_z_max": 1.0,             # BEV display Z filter max (sensor-relative)
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -847,7 +847,7 @@ class SocialNavigator:
 
         has_lidar = self._lidar_ranges is not None
         has_humans = bool(self._tracked_humans)
-        if not has_lidar and not has_humans:
+        if not has_lidar and not has_humans and not show_heatmap:
             return image
 
         sz = 600
@@ -869,7 +869,7 @@ class SocialNavigator:
         ).astype(np.uint8)
 
         # Safety heatmap underlay
-        if show_heatmap and has_humans:
+        if show_heatmap:
             grid, extent = self.get_safety_heatmap(
                 xlim=(-bev_range / 2, bev_range / 2),
                 ylim=(0, bev_range),
@@ -1026,16 +1026,16 @@ class SocialNavigator:
             extent:      [xmin, xmax, ymin, ymax] for imshow
             Returns (None, None) if no humans are tracked.
         """
-        if not self._tracked_humans:
-            return None, None
-
         human_positions = [
             tuple(h.position_rf)
             for h in self._tracked_humans.values()
             if h.position_rf is not None
         ]
         if not human_positions:
-            return None, None
+            # No humans — return uniform safe grid
+            x = np.arange(xlim[0], xlim[1], resolution)
+            y = np.arange(ylim[0], ylim[1], resolution)
+            return np.ones((len(y), len(x))), [xlim[0], xlim[1], ylim[0], ylim[1]]
 
         human_predicted_paths = {
             h.track_id: h.predicted_path
