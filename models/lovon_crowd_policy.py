@@ -1,26 +1,11 @@
 """
 LOVON Policy for CrowdNav
 ==========================
-Wraps the LOVON L2MM model and SocialNavigator as a CrowdNav-compatible Policy.
-
-The CrowdNav environment provides ground-truth human states (px, py, vx, vy, radius)
-rather than camera/LiDAR data. This policy translates those into the formats
-expected by L2MM and SocialNavigator.
-
-Usage:
-    from models.lovon_crowd_policy import LOVONCrowdPolicy
-
-    policy = LOVONCrowdPolicy()
-    policy.configure(policy_config)           # standard CrowdNav config
-    policy.load_lovon(model_path, tokenizer_path)  # LOVON-specific loading
-
-    robot.set_policy(policy)
 """
 
 import numpy as np
 from crowd_sim.envs.policy.policy import Policy
 from crowd_sim.envs.utils.action import ActionXY, ActionRot
-from models.safety import world_to_robot_frame, world_to_robot_frame_velocity
 
 
 class LOVONCrowdPolicy(Policy):
@@ -182,7 +167,7 @@ class LOVONCrowdPolicy(Policy):
         if self.social_nav is None:
             return motion_vector
 
-        gt_humans = self._build_gt_humans(self_state, human_states)
+        gt_humans = self._sim_humans_to_robot_frame(self_state, human_states)
 
         motion_vector = self.social_nav.step_ground_truth(
             motion_vector=motion_vector,
@@ -191,7 +176,7 @@ class LOVONCrowdPolicy(Policy):
         )
         return motion_vector
 
-    def _build_gt_humans(self, self_state, human_states):
+    def _sim_humans_to_robot_frame(self, self_state, human_states):
         """
         Transform CrowdNav world-frame human states into robot-frame dicts
         for SocialNavigator.step_ground_truth().
@@ -209,11 +194,11 @@ class LOVONCrowdPolicy(Policy):
         """
         gt_humans = []
         for i, h in enumerate(human_states):
-            x_lat, depth = world_to_robot_frame(
+            x_lat, depth = self.world_to_robot_frame(
                 h.px, h.py, self_state.px, self_state.py, self_state.theta
             )
             distance = np.hypot(h.px - self_state.px, h.py - self_state.py)
-            vx_lat, v_depth = world_to_robot_frame_velocity(
+            vx_lat, v_depth = self.world_to_robot_frame_velocity(
                 h.vx, h.vy, self_state.theta
             )
             gt_humans.append({
@@ -270,3 +255,38 @@ class LOVONCrowdPolicy(Policy):
             speed = min(speed, self_state.v_pref)
             r = omega_z * self.time_step
             return ActionRot(v=speed, r=r)
+
+    # ------------------------------------------------------------------
+    #  Coordinate transform: world frame -> robot frame
+    # ------------------------------------------------------------------
+
+    def world_to_robot_frame(self, human_px, human_py, robot_px, robot_py, robot_theta):
+        """
+        Transform a world-frame position into robot-frame [x_lateral, depth].
+
+        Robot frame convention (matching SocialNavigator):
+            x_lateral: positive = right of robot
+            depth:     positive = forward from robot
+        """
+        dx = human_px - robot_px
+        dy = human_py - robot_py
+        cos_t = np.cos(-robot_theta)
+        sin_t = np.sin(-robot_theta)
+        x_rot = dx * cos_t - dy * sin_t
+        y_rot = dx * sin_t + dy * cos_t
+        depth = x_rot
+        x_lateral = -y_rot
+        return x_lateral, depth
+
+    def world_to_robot_frame_velocity(self, human_vx, human_vy, robot_theta):
+        """
+        Transform a world-frame velocity into robot-frame [vx_lateral, v_depth].
+        Same rotation as position but without translation.
+        """
+        cos_t = np.cos(-robot_theta)
+        sin_t = np.sin(-robot_theta)
+        x_rot = human_vx * cos_t - human_vy * sin_t
+        y_rot = human_vx * sin_t + human_vy * cos_t
+        v_depth = x_rot
+        vx_lateral = -y_rot
+        return vx_lateral, v_depth

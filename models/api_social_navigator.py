@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
-from models.safety import combined_safety_score
+from models.safety import robot_safety_score
 
 logger = logging.getLogger("SocialNavigator")
 logger.setLevel(logging.DEBUG)
@@ -735,38 +735,28 @@ class SocialNavigator:
     def _compute_safety_score(self):
         # type: () -> float
         """
-        Compute a safety score combining proximity and trajectory threat.
-
-        Two components combined via min():
-          s_prox  - Gaussian proximity to closest human (current positions)
-          s_traj  - minimum predicted future distance over horizon
-
-        Uses shared functions from models.safety.
+        Compute safety score at robot's location using the same function
+        that the heatmap uses. Robot is at origin in robot frame; humans
+        are at their position_rf coordinates.
         """
-        sigma = self.params["sigma"]
-        h = self.params["h"]
-
         if not self._tracked_humans:
             return 1.0
 
-        distances = [
-            human.distance for human in self._tracked_humans.values()
-            if human.distance is not None
+        # Human positions in robot frame (robot is at origin)
+        human_positions = [
+            tuple(human.position_rf)
+            for human in self._tracked_humans.values()
+            if human.position_rf is not None
         ]
 
-        human_paths = {
+        human_predicted_paths = {
             human.track_id: human.predicted_path
             for human in self._tracked_humans.values()
             if human.predicted_path
         }
 
-        score = combined_safety_score(
-            distances=distances,
-            robot_path=self._robot_predicted_path,
-            human_paths=human_paths,
-            sigma=sigma,
-            h=h,
-        )
+        score = robot_safety_score(0.0, 0.0, human_positions,
+                                   human_predicted_paths=human_predicted_paths)
 
         logger.debug("safety_score=%.3f", score)
         return score

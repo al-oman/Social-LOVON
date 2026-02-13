@@ -1,130 +1,123 @@
 """
 Shared safety computation for Social-LOVON.
 ============================================
+
+Core function: safety_score_at_point(point, human_positions, ...)
+  - Heatmap calls it over a meshgrid via compute_safety_grid
+  - Robot calls it at its own location via robot_safety_score
+  - Combines all terms: gaussian proximity + trajectory prediction
 """
 
 import math
 import numpy as np
+
+# ------------------------------------------------------------------
+#  Safety parameters
+# ------------------------------------------------------------------
+SIGMA = 2    # Gaussian width (meters)
+H = 1.0        # peak danger at distance=0
 
 
 # ------------------------------------------------------------------
 #  Term 1: Gaussian proximity
 # ------------------------------------------------------------------
 
-def gaussian_proximity_score(distance, sigma=0.8, h=1.0):
+def _gaussian_term(point_x, point_y, human_positions, sigma=SIGMA, h=H):
     """
-    s = 1 - h * exp(-d^2 / (2 * sigma^2))
-
-    Args:
-        distance: scalar or numpy array of distances (meters)
-        sigma:    Gaussian width parameter (meters)
-        h:        peak danger at distance=0
-    """
-    d = np.asarray(distance, dtype=np.float64)
-    score = 1.0 - h * np.exp(-(d ** 2) / (2.0 * sigma ** 2))
-    return np.clip(score, 0.0, 1.0)
-
-
-# ------------------------------------------------------------------
-#  Term 2: Trajectory safety
-# ------------------------------------------------------------------
-
-def trajectory_safety_score(robot_path, human_paths, sigma=0.8, h=1.0):
-    """
-    Worst-case safety score across all future timesteps and humans.
-
-    For each timestep, computes distance between robot and each human's
-    predicted position. Returns the worst (lowest) Gaussian safety score.
-
-    Args:
-        robot_path:  list of [x, y] robot predicted positions (robot frame)
-        human_paths: dict {track_id: list of [x, y]} human predicted paths
-        sigma:       Gaussian width parameter
-        h:           peak danger at distance=0
+    Gaussian proximity safety for a single point against all humans.
 
     Returns:
-        float in [0, 1]. 1.0 if no human paths.
+        float in [0, 1]. Worst (min) across all humans.
     """
-    if not human_paths or not robot_path:
-        return 1.0
-
-    worst_score = 1.0
-    robot_arr = np.asarray(robot_path, dtype=np.float64)
-
-    for _tid, hpath in human_paths.items():
-        h_arr = np.asarray(hpath, dtype=np.float64)
-        n = min(len(robot_arr), len(h_arr))
-        if n == 0:
-            continue
-        diffs = robot_arr[:n] - h_arr[:n]
-        dists = np.sqrt(np.sum(diffs ** 2, axis=1))
-        min_dist = float(np.min(dists))
-        s = float(gaussian_proximity_score(min_dist, sigma=sigma, h=h))
-        worst_score = min(worst_score, s)
-
-    return worst_score
+    safety = 1.0
+    for (hx, hy) in human_positions:
+        dist = math.sqrt((point_x - hx) ** 2 + (point_y - hy) ** 2)
+        s = 1.0 - h * math.exp(-(dist ** 2) / (2.0 * sigma ** 2))
+        safety = min(safety, s)
+    return safety
 
 
 # ------------------------------------------------------------------
-#  Combiner: skeleton that merges all terms
+#  Term 2: Trajectory prediction threat
 # ------------------------------------------------------------------
 
-def combined_safety_score(distances, robot_path=None, human_paths=None,
-                          sigma=0.8, h=1.0):
+def _trajectory_term(point_x, point_y, human_predicted_paths, sigma=SIGMA, h=H):
     """
-    Combine all safety terms into a single score.
-
-    Current terms:
-      - s_prox: Gaussian proximity (closest human distance)
-      - s_traj: trajectory prediction threat
-
-    Add new terms here as they are developed.
+    Trajectory-based safety: how close will predicted human paths
+    come to this point in the future?
 
     Args:
-        distances:   list of float distances to each human (meters), may be empty
-        robot_path:  list of [x, y] robot predicted positions (for s_traj)
-        human_paths: dict {track_id: list of [x, y]} human predicted paths
-        sigma:       Gaussian width
-        h:           peak danger
+        point_x, point_y: the query point
+        human_predicted_paths: dict {track_id: [(x,y), (x,y), ...]}
+                               predicted future positions per human.
+                               None or empty means no trajectory data.
+        sigma, h: Gaussian parameters
+
+    Returns:
+        float in [0, 1]. Worst (min) across all humans and timesteps.
+    """
+    if not human_predicted_paths:
+        return 1.0
+
+    for _tid, path in human_predicted_paths.items():
+        for (fx, fy) in path:
+            dist = math.sqrt((point_x - fx) ** 2 + (point_y - fy) ** 2)
+            s = 1.0 - h * math.exp(-(dist ** 2) / (2.0 * sigma ** 2))
+            safety = min(safety, s)
+
+    return safety
+
+
+# ------------------------------------------------------------------
+#  THE safety function: score at a single point
+# ------------------------------------------------------------------
+
+def safety_score_at_point(point_x, point_y, human_positions,
+                          human_predicted_paths=None, sigma=SIGMA, h=H):
+    """
+    Compute the safety score at a single (x, y) location.
+
+    This is THE single source of truth for safety — both the heatmap
+    and the robot score use this same function.
+
+    Combines:
+      - Gaussian proximity (current human positions)
+      - Trajectory threat (predicted future human positions)
+
+    Args:
+        point_x: float, x coordinate
+        point_y: float, y coordinate
+        human_positions: list of (hx, hy) tuples, current positions
+        human_predicted_paths: dict {track_id: [(x,y),...]} or None
+        sigma:   Gaussian width parameter (meters)
+        h:       peak danger at distance=0
 
     Returns:
         float in [0, 1]. 1.0 = safe, 0.0 = dangerous.
     """
-    # Term 1: proximity
-    if distances:
-        d_min = min(distances)
-        s_prox = float(gaussian_proximity_score(d_min, sigma=sigma, h=h))
-    else:
-        s_prox = 1.0
+    s_gauss = _gaussian_term(point_x, point_y, human_positions, sigma, h)
+    s_traj = _trajectory_term(point_x, point_y, human_predicted_paths, sigma, h)
 
-    # Term 2: trajectory
-    s_traj = trajectory_safety_score(
-        robot_path or [], human_paths or {}, sigma=sigma, h=h
-    )
-
-    # --- Combine (add new terms to this min) ---
-    score = min(s_prox, s_traj)
+    score = min(s_gauss, s_traj)
     return max(0.0, min(1.0, score))
 
 
 # ------------------------------------------------------------------
-#  2D safety grid (for heatmap visualization)
+#  2D safety grid (heatmap) — just runs safety_score_at_point on grid
 # ------------------------------------------------------------------
 
 def compute_safety_grid(human_positions, xlim, ylim, resolution=0.1,
-                        sigma=0.8, h=1.0):
+                        human_predicted_paths=None, sigma=SIGMA, h=H):
     """
-    Compute a 2D safety field over a grid in world frame.
-
-    For each grid cell, computes distance to every human and calls
-    combined_safety_score. Currently only the proximity term contributes
-    (trajectory data is not available at the grid level).
+    Compute a 2D safety field by evaluating safety_score_at_point
+    over a meshgrid.
 
     Args:
         human_positions: list of (px, py) tuples in world frame
         xlim:           (xmin, xmax)
         ylim:           (ymin, ymax)
         resolution:     grid cell size in meters
+        human_predicted_paths: dict {track_id: [(x,y),...]} or None
         sigma:          Gaussian width
         h:              peak danger
 
@@ -134,53 +127,43 @@ def compute_safety_grid(human_positions, xlim, ylim, resolution=0.1,
     """
     x = np.arange(xlim[0], xlim[1], resolution)
     y = np.arange(ylim[0], ylim[1], resolution)
-    xx, yy = np.meshgrid(x, y)
+    safety = np.empty((len(y), len(x)), dtype=np.float64)
 
-    safety = np.ones_like(xx)
-    for (hx, hy) in human_positions:
-        dist = np.sqrt((xx - hx) ** 2 + (yy - hy) ** 2)
-        # Each human contributes a proximity term; combined_safety_score
-        # applied per-human (grid has no trajectory data, so s_traj=1.0)
-        per_human = gaussian_proximity_score(dist, sigma=sigma, h=h)
-        safety = np.minimum(safety, per_human)
+    for i, yi in enumerate(y):
+        for j, xj in enumerate(x):
+            safety[i, j] = safety_score_at_point(
+                xj, yi, human_positions,
+                human_predicted_paths=human_predicted_paths,
+                sigma=sigma, h=h,
+            )
 
-    safety = np.clip(safety, 0.0, 1.0)
     extent = [xlim[0], xlim[1], ylim[0], ylim[1]]
     return safety, extent
 
 
 # ------------------------------------------------------------------
-#  Coordinate transform: world frame -> robot frame
+#  Robot safety score — safety_score_at_point at robot's location
 # ------------------------------------------------------------------
 
-def world_to_robot_frame(human_px, human_py, robot_px, robot_py, robot_theta):
+def robot_safety_score(robot_x, robot_y, human_positions,
+                       human_predicted_paths=None, sigma=SIGMA, h=H):
     """
-    Transform a world-frame position into robot-frame [x_lateral, depth].
+    Compute the safety score at the robot's current position.
 
-    Robot frame convention (matching SocialNavigator):
-        x_lateral: positive = right of robot
-        depth:     positive = forward from robot
+    Same function as the heatmap uses, evaluated at one point.
+
+    Args:
+        robot_x, robot_y: robot position
+        human_positions:   list of (hx, hy) tuples
+        human_predicted_paths: dict {track_id: [(x,y),...]} or None
+        sigma, h:          Gaussian parameters
+
+    Returns:
+        float in [0, 1].
     """
-    dx = human_px - robot_px
-    dy = human_py - robot_py
-    cos_t = math.cos(-robot_theta)
-    sin_t = math.sin(-robot_theta)
-    x_rot = dx * cos_t - dy * sin_t
-    y_rot = dx * sin_t + dy * cos_t
-    depth = x_rot
-    x_lateral = -y_rot
-    return x_lateral, depth
+    return safety_score_at_point(robot_x, robot_y, human_positions,
+                                human_predicted_paths=human_predicted_paths,
+                                sigma=sigma, h=h)
 
 
-def world_to_robot_frame_velocity(human_vx, human_vy, robot_theta):
-    """
-    Transform a world-frame velocity into robot-frame [vx_lateral, v_depth].
-    Same rotation as position but without translation.
-    """
-    cos_t = math.cos(-robot_theta)
-    sin_t = math.sin(-robot_theta)
-    x_rot = human_vx * cos_t - human_vy * sin_t
-    y_rot = human_vx * sin_t + human_vy * cos_t
-    v_depth = x_rot
-    vx_lateral = -y_rot
-    return vx_lateral, v_depth
+
