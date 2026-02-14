@@ -427,9 +427,10 @@ class SocialNavigator:
         if np.count_nonzero(mask) < self.params["lidar_min_points"]:
             return None
 
-        # Horizontal distance (ignore z)
-        dist = np.sqrt(lx[mask] ** 2 + ly[mask] ** 2)
-        return float(np.median(dist))
+        # Forward depth (lx = forward in lidar frame).
+        # Using forward depth (not range) so _pixel_to_robot_frame's
+        # pinhole inversion x_lat = depth * (u - cx) / fx is correct.
+        return float(np.median(lx[mask]))
 
     def _estimate_distance_mono(self, det):
         # type: (dict) -> Optional[float]
@@ -881,11 +882,13 @@ class SocialNavigator:
                 cmap_fn = matplotlib.cm.get_cmap('RdYlGn')
                 rgba = cmap_fn(grid)[:, :, :3]  # drop alpha, shape (ny, nx, 3)
                 hm_bgr = (rgba[:, :, ::-1] * 255).astype(np.uint8)  # RGB→BGR
-                hm_bgr = _cv2.resize(hm_bgr, (sz, sz), interpolation=_cv2.INTER_NEAREST)
+                # Resize to padded area (matching the human dot coordinate system)
+                inner = sz - 2 * pad
+                hm_bgr = _cv2.resize(hm_bgr, (inner, inner), interpolation=_cv2.INTER_NEAREST)
                 # flip vertically so depth=0 is at bottom
                 hm_bgr = _cv2.flip(hm_bgr, 0)
-                # blend with darkened background
-                roi = image[y0:y0+sz, x0:x0+sz]
+                # blend into the padded region of the BEV
+                roi = image[y0+pad:y0+pad+inner, x0+pad:x0+pad+inner]
                 _cv2.addWeighted(hm_bgr, 0.5, roi, 0.5, 0, roi)
 
         _cv2.rectangle(image, (x0, y0), (x0 + sz, y0 + sz), (255, 255, 255), 1)

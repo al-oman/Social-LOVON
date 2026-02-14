@@ -469,7 +469,6 @@ class VisualLanguageController:
                 env_config_path=args.env_config,
                 policy_config_path=args.policy_config,
                 target_object=self.extracted_object,
-                image_width=args.image_width,
             )
             self.crowdnav_provider.reset()
             self.crowdnav_provider.init_render()
@@ -487,8 +486,12 @@ class VisualLanguageController:
             self.lidar_getter_thread = None
 
         # Load social navigaton function
+        sn_width = self.crowdnav_provider.image_width if self.crowdnav_sim_mode else args.image_width
+        sn_kwargs = {"image_width": sn_width}
+        if self.crowdnav_sim_mode:
+            sn_kwargs["use_lidar_depth"] = True
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
-                                          image_width=args.image_width)
+                                          **sn_kwargs)
 
         # Initialize UI
         self.root = Tk()

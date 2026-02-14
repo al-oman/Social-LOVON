@@ -20,18 +20,19 @@ class CrowdNavDataProvider:
     HUMAN_WIDTH = 0.5       # meters, for bbox projection
     HUMAN_HEIGHT = 1.7      # meters, for bbox projection
     LIDAR_PTS_PER_HUMAN = 15
+    LIDAR_NOISE_SCALE = 0.0 # fraction of human radius used as gaussian std dev
 
     def __init__(self, env_config_path, policy_config_path,
-                 fov_deg=120.0, image_width=640, image_height=720,
-                 target_object="handbag"):
-        # Camera model (must match SocialNavigator / deploy params)
-        self.image_width = image_width
-        self.image_height = image_height
+                 fov_deg=120.0, target_object="handbag"):
+        # Camera model uses display dimensions so bounding boxes
+        # align with the blank frame shown in the deploy GUI.
+        self.image_width = self.DISPLAY_WIDTH
+        self.image_height = self.DISPLAY_HEIGHT
         self.fov_deg = fov_deg
         half_fov = math.radians(fov_deg / 2.0)
-        self._fx = (image_width / 2.0) / math.tan(half_fov)
-        self._cx = image_width / 2.0
-        self._cy = image_height / 2.0
+        self._fx = (self.image_width / 2.0) / math.tan(half_fov)
+        self._cx = self.image_width / 2.0
+        self._cy = self.image_height / 2.0
 
         self.target_object = target_object
 
@@ -160,9 +161,9 @@ class CrowdNavDataProvider:
             r = h["radius"]
             n = self.LIDAR_PTS_PER_HUMAN
 
-            all_x.append(cx + np.random.uniform(-r, r, n))
-            all_y.append(cy + np.random.uniform(-r, r, n))
-            all_z.append(np.random.uniform(0.0, 1.0, n))
+            all_x.append(cx + np.random.normal(0, r * self.LIDAR_NOISE_SCALE, n))
+            all_y.append(cy + np.random.normal(0, r * self.LIDAR_NOISE_SCALE, n))
+            all_z.append(np.clip(np.random.normal(0.5, 0.25, n), 0.0, 1.0))
 
         if all_x:
             return {"x": np.concatenate(all_x),
@@ -266,8 +267,8 @@ class CrowdNavDataProvider:
         patches = self._patches
         ax = self._ax
         ax.cla()
-        ax.set_xlim(-6, 6)
-        ax.set_ylim(-6, 6)
+        ax.set_xlim(-3, 3)
+        ax.set_ylim(-3, 3)
         ax.set_xlabel('x(m)')
         ax.set_ylabel('y(m)')
 
