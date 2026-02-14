@@ -347,7 +347,8 @@ class VisualLanguageController:
                  lengthen_filter=3,
                  simulation_mode=False, 
                  socialnav_enabled=False,
-                 network_device="enp8s0"):
+                 network_device="enp8s0",
+                 crowdnav_sim_mode=False):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
@@ -373,6 +374,7 @@ class VisualLanguageController:
         self.socialnav_enabled = socialnav_enabled  # Whether to enable social navigation adjustments
         self.button_update_inst = False
         self.network_device = network_device
+        self.crowdnav_sim_mode = crowdnav_sim_mode
 
         # Initialize RealSense camera if selected
         # if self.camera_type == "realsense":
@@ -486,15 +488,15 @@ class VisualLanguageController:
         # Mission instruction input area
         initial_instructions = [
             "Run to the bus at speed of 0.36 m/s",
-            "move to the person at speed of 0.7 m/s",
-            "Run to the human at speed of 0.5 m/s",
-            "run to the chair at speed of 0.4 m/s",
-            "approach the car at speed of 0.5 m/s",
-            "run to the bicycle at speed of 0.4 m/s",
-            "Rush to the chair at speed of 0.3 m/s",
-            "move to the armchair at speed of 0.35 m/s",
-            "Sprint to the game ball at speed of 0.35 m/s",
-            "Approach to the laptop at speed of 0.3 m/s"
+            # "move to the person at speed of 0.7 m/s",
+            # "Run to the human at speed of 0.5 m/s",
+            # "run to the chair at speed of 0.4 m/s",
+            # "approach the car at speed of 0.5 m/s",
+            # "run to the bicycle at speed of 0.4 m/s",
+            # "Rush to the chair at speed of 0.3 m/s",
+            # "move to the armchair at speed of 0.35 m/s",
+            # "Sprint to the game ball at speed of 0.35 m/s",
+            # "Approach to the laptop at speed of 0.3 m/s"
         ]
 
         self.instruction_entries = []
@@ -1059,6 +1061,8 @@ if __name__ == "__main__":
                       help='Width of input images')
     parser.add_argument('--network_device', type=str, default="enp8s0",
                       help='Netowrk Card')
+    parser.add_argument('--crowdnav_sim_mode', action='store_true', default=False,
+                help='take input data from CrowdNav simulator')
     args = parser.parse_args()
 
     # Initialize and run controller
@@ -1077,7 +1081,8 @@ if __name__ == "__main__":
         lengthen_filter=args.lengthen_filter,
         simulation_mode=args.simulation_mode,
         socialnav_enabled=args.socialnav_enabled,
-        network_device=args.network_device
+        network_device=args.network_device, 
+        crowdnav_sim_mode=args.crowdnav_sim_mode
     )
     controller.run()
     print("Program terminated.")
