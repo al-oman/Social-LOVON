@@ -300,17 +300,22 @@ class MotionControlThread(threading.Thread):
         super().__init__()
         self.controller = controller
         self.running = True
-        self.result_queue = controller.yolo_processing_thread.result_queue
+        if not controller.crowdnav_sim_mode:
+            self.result_queue = controller.yolo_processing_thread.result_queue
         self.freq_start = time.time()
         self.freq_count = 0
 
     def run(self):
         while self.running:
             try:
-                state = self.result_queue.get(timeout=1)
-                with self.controller.motion_lock:
-                    self.controller._update_motion_control(state)
-                    self.controller._control_robot()
+                if self.controller.crowdnav_sim_mode:
+                    self._crowdnav_tick()
+                    time.sleep(self.controller.crowdnav_provider.time_step)
+                else:
+                    state = self.result_queue.get(timeout=1)
+                    with self.controller.motion_lock:
+                        self.controller._update_motion_control(state)
+                        self.controller._control_robot()
 
                 self.freq_count += 1
                 if time.time() - self.freq_start >= 1:
@@ -324,8 +329,41 @@ class MotionControlThread(threading.Thread):
             except queue.Empty:
                 continue
             except Exception as e:
+                import traceback
                 print(f"MotionControl Error: {e}")
+                traceback.print_exc()
                 time.sleep(0.1)
+
+    def _crowdnav_tick(self):
+        c = self.controller
+        mv = c.motion_vector if hasattr(c, 'motion_vector') else [0.0, 0.0, 0.0]
+        synthetic = c.crowdnav_provider.step(mv)
+        if synthetic is None:
+            print("CrowdNav episode finished.")
+            self.running = False
+            return
+
+        # Update controller state from synthetic data
+        c.pose_state = synthetic["pose_state"]
+        c.state.update(synthetic["object_state"])
+
+        # Push blank frame to GUI image queue
+        frame = c.crowdnav_provider.get_blank_frame()
+        img_q = c.image_getter_thread.image_queue
+        if not img_q.empty():
+            try:
+                img_q.get_nowait()
+            except queue.Empty:
+                pass
+        img_q.put(frame)
+
+        # Build L2MM input: merge current state with synthetic object fields
+        state = {**c.state}
+
+        with c.motion_lock:
+            c._update_motion_control(state, lidar_cloud=synthetic["lidar"])
+
+        c.crowdnav_provider.render_frame()
 
     def stop(self):
         self.running = False
@@ -355,8 +393,9 @@ class VisualLanguageController:
             model_path=object_extraction_model_path,
             tokenizer_path=tokenizer_path
         )
-        self.yolo_model = YOLO(yolo_model_dir)
-        self.yolo_pose_model = YOLO(yolo_pose_model_dir)
+        if not crowdnav_sim_mode:
+            self.yolo_model = YOLO(yolo_model_dir)
+            self.yolo_pose_model = YOLO(yolo_pose_model_dir)
         self.motion_predictor = MotionPredictor(
             model_path=language2motion_model_path,
             tokenizer_path=tokenizer_path
@@ -384,7 +423,7 @@ class VisualLanguageController:
         #     self.pipeline.start(self.config)
 
         # Initialize Unitree SDK components
-        if not self.simulation_mode:
+        if not self.simulation_mode and not self.crowdnav_sim_mode:
             self._init_channel_factory()
             self.video_client = self._init_camera()
             self.sport_client = self._init_sport()
@@ -399,6 +438,7 @@ class VisualLanguageController:
             "object_whn": [0.00, 0.00],
             "mission_state_in": "success",
             "search_state_in": "had_searching_1",
+            "bounding_box": None,
         }
         self.extracted_object = self.object_extractor.predict(self.mission_instruction_1)
 
@@ -422,12 +462,26 @@ class VisualLanguageController:
         self.motion_control_freq = 0.0
         self.lidar_getter_freq = 0.0
 
+        # CrowdNav sim provider (replaces camera + lidar + YOLO)
+        if self.crowdnav_sim_mode:
+            from models.crowdnav_data_provider import CrowdNavDataProvider
+            self.crowdnav_provider = CrowdNavDataProvider(
+                env_config_path=args.env_config,
+                policy_config_path=args.policy_config,
+                target_object=self.extracted_object,
+                image_width=args.image_width,
+            )
+            self.crowdnav_provider.reset()
+            self.crowdnav_provider.init_render()
+            self.motion_vector = [0.0, 0.0, 0.0]
+
         # Initialize worker threads
         self.image_getter_thread = ImageGetterThread(self)
-        self.yolo_processing_thread = YoloProcessingThread(self)
-        self.yolo_pose_processing_thread = YoloPoseProcessingThread(self)
+        if not self.crowdnav_sim_mode:
+            self.yolo_processing_thread = YoloProcessingThread(self)
+            self.yolo_pose_processing_thread = YoloPoseProcessingThread(self)
         self.motion_control_thread = MotionControlThread(self)
-        if not self.simulation_mode:
+        if not self.simulation_mode and not self.crowdnav_sim_mode:
             self.lidar_getter_thread = LiDARGetterThread(self)
         else:
             self.lidar_getter_thread = None
@@ -793,7 +847,7 @@ class VisualLanguageController:
             "pose_boxes": pose_boxes
         })
 
-    def _update_motion_control(self, state):
+    def _update_motion_control(self, state, lidar_cloud=None):
         """Update Motion Control Parameters Based on Detection Results"""
         input_data = {
             "mission_instruction_0": self.mission_instruction_0,
@@ -809,7 +863,8 @@ class VisualLanguageController:
         # Addition of Social Nav element! Adjusts the output of L2MM motion vector
         #-----------------------------------------------------------
 
-        lidar_cloud = self.lidar_getter_thread.get_cloud() if self.lidar_getter_thread else None
+        if lidar_cloud is None:
+            lidar_cloud = self.lidar_getter_thread.get_cloud() if self.lidar_getter_thread else None
         self.motion_vector = self.social_nav.step(
             motion_vector=self.motion_vector,
             pose_state=self.pose_state,
@@ -985,18 +1040,20 @@ class VisualLanguageController:
 
     def start_threads(self):
         """Start All Worker Threads"""
-        self.image_getter_thread.start()
-        self.yolo_processing_thread.start()
-        self.yolo_pose_processing_thread.start()
+        if not self.crowdnav_sim_mode:
+            self.image_getter_thread.start()
+            self.yolo_processing_thread.start()
+            self.yolo_pose_processing_thread.start()
         self.motion_control_thread.start()
         if self.lidar_getter_thread:
             self.lidar_getter_thread.start()
 
     def stop_threads(self):
         """Stop All Worker Threads"""
-        self.image_getter_thread.stop()
-        self.yolo_processing_thread.stop()
-        self.yolo_pose_processing_thread.stop()
+        if not self.crowdnav_sim_mode:
+            self.image_getter_thread.stop()
+            self.yolo_processing_thread.stop()
+            self.yolo_pose_processing_thread.stop()
         self.motion_control_thread.stop()
         if self.lidar_getter_thread:
             self.lidar_getter_thread.stop()
@@ -1063,6 +1120,10 @@ if __name__ == "__main__":
                       help='Netowrk Card')
     parser.add_argument('--crowdnav_sim_mode', action='store_true', default=False,
                 help='take input data from CrowdNav simulator')
+    parser.add_argument('--env_config', type=str, default='configs/env_lovon.config',
+                help='CrowdNav environment config file (crowdnav_sim_mode)')
+    parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config',
+                help='CrowdNav policy config file (crowdnav_sim_mode)')
     args = parser.parse_args()
 
     # Initialize and run controller
