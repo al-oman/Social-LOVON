@@ -120,7 +120,7 @@ class SocialNavigator:
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
         # --- BEV minimap display ---
         "bev_range_m": 5.0,            # visible range in BEV (meters), independent of d_max
-        "bev_z_min": 0.0,            # BEV display Z filter min (sensor-relative)
+        "bev_z_min": -1.0,            # BEV display Z filter min (sensor-relative)
         "bev_z_max": 1.0,             # BEV display Z filter max (sensor-relative)
     }
 

@@ -1,3 +1,4 @@
 {
+    "debugpy.debugpyPath": "/home/ubuntu/miniconda3/envs/crowdnav_38/lib/python3.8/site-packages/debugpy",
     "ros.distro": "humble"
 }

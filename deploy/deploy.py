@@ -71,14 +71,17 @@ class LiDARGetterThread(threading.Thread):
         self.freq_count = 0
 
     def run(self):
-        sub = ChannelSubscriber('rt/utlidar/cloud', PointCloud2_)
-        sub.Init(handler=self._on_pointcloud, queueLen=10)
+        self._sub = ChannelSubscriber('rt/utlidar/cloud', PointCloud2_)
+        self._sub.Init(handler=self._on_pointcloud, queueLen=10)
         while self.running:
             time.sleep(0.5)
 
     def _on_pointcloud(self, msg: PointCloud2_):
         try:
             cloud = pointcloud2_to_array(msg)
+            #pretty sure this is right
+            cloud['x'] = -cloud['x']
+            # cloud['y'] = -cloud['y']
             with self.lidar_lock:
                 self.latest_cloud = cloud
 

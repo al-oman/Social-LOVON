@@ -70,13 +70,13 @@ WINDOW_NAME = "LiDAR Top-Down View"
 CANVAS_SIZE = 800
 RANGE_M = 10.0          # initial visible range in meters (half-width)
 RANGE_STEP = 2.0        # zoom step in meters
-RANGE_MIN = 2.0
+RANGE_MIN = 0.1
 RANGE_MAX = 50.0
 POINT_RADIUS = 1
 
 # --- Tunable filtering parameters ---
 Z_MIN = 0.0         # meters — drop points below this (ground plane)
-Z_MAX = 0.1             # meters — drop points above this (ceiling / noise)
+Z_MAX = 2.0             # meters — drop points above this (ceiling / noise)
 DIST_MAX = 30.0         # meters — drop points farther than this
 ORIGIN_THRESH = 0.01    # meters — drop points within this radius of (0,0,0)
 _first_frame_printed = False
