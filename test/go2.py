@@ -102,7 +102,7 @@ def main():
     try:
         while True:
             # Get user input
-            cmd = input("Command (h for help): ").strip().lower()
+            cmd = input("Command (h for help): ").strip()
            
             if cmd == 'w':
                 print("→ Moving forward...")
