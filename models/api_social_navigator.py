@@ -841,33 +841,20 @@ class SocialNavigator:
     #  Utilities                                                          #
     # ================================================================== #
 
-    # Draw birds-eye view minimap
-    def draw_bev(self, image, show_heatmap=False):
-        """Draw bird's-eye-view mini-map on bottom-right of image."""
+    # Render bird's-eye view as standalone image
+    def render_bev(self, show_heatmap=False):
+        """Render a standalone  bird's-eye-view image and return it."""
         import cv2 as _cv2
+
+        sz = 400
+        pad = 60
+        bev_range = self.params["bev_range_m"]
+        scale = (sz - 2 * pad) / bev_range
+
+        bev = np.zeros((sz, sz, 3), dtype=np.uint8)
 
         has_lidar = self._lidar_ranges is not None
         has_humans = bool(self._tracked_humans)
-        if not has_lidar and not has_humans and not show_heatmap:
-            return image
-
-        sz = 600
-        margin = 10
-        pad = 60
-        bev_range = self.params["bev_range_m"]
-        scale = (sz - 2 * pad) / bev_range   # px per meter
-
-        h, w = image.shape[:2]
-        if w < sz + margin or h < sz + margin:
-            return image
-
-        x0 = w - sz - margin
-        y0 = h - sz - margin
-
-        # Darken background
-        image[y0:y0+sz, x0:x0+sz] = (
-            image[y0:y0+sz, x0:x0+sz].astype(np.float32) * 0.3
-        ).astype(np.uint8)
 
         # Safety heatmap underlay
         if show_heatmap:
@@ -877,36 +864,33 @@ class SocialNavigator:
                 resolution=bev_range / 50,
             )
             if grid is not None:
-                import matplotlib
-                matplotlib.use('Agg')
-                cmap_fn = matplotlib.cm.get_cmap('RdYlGn')
-                rgba = cmap_fn(grid)[:, :, :3]  # drop alpha, shape (ny, nx, 3)
-                hm_bgr = (rgba[:, :, ::-1] * 255).astype(np.uint8)  # RGB→BGR
-                # Resize to padded area (matching the human dot coordinate system)
+                if not hasattr(self, '_bev_cmap'):
+                    import matplotlib
+                    matplotlib.use('Agg')
+                    self._bev_cmap = matplotlib.cm.get_cmap('RdYlGn')
+                rgba = self._bev_cmap(grid)[:, :, :3]
+                hm_bgr = (rgba[:, :, ::-1] * 255).astype(np.uint8)
                 inner = sz - 2 * pad
                 hm_bgr = _cv2.resize(hm_bgr, (inner, inner), interpolation=_cv2.INTER_NEAREST)
-                # flip vertically so depth=0 is at bottom
                 hm_bgr = _cv2.flip(hm_bgr, 0)
-                # blend into the padded region of the BEV
-                roi = image[y0+pad:y0+pad+inner, x0+pad:x0+pad+inner]
-                _cv2.addWeighted(hm_bgr, 0.5, roi, 0.5, 0, roi)
+                bev[pad:pad+inner, pad:pad+inner] = hm_bgr
 
-        _cv2.rectangle(image, (x0, y0), (x0 + sz, y0 + sz), (255, 255, 255), 1)
+        _cv2.rectangle(bev, (0, 0), (sz - 1, sz - 1), (255, 255, 255), 1)
 
         # Robot at bottom-center
-        rcx = x0 + sz // 2
-        rcy = y0 + sz - pad
+        rcx = sz // 2
+        rcy = sz - pad
 
-        # Range-ring semicircles (forward half)
+        # Range-ring semicircles
         for r_m in np.arange(1.0, bev_range + 0.01, 1.0):
             r_px = int(r_m * scale)
-            _cv2.ellipse(image, (rcx, rcy), (r_px, r_px), 0, 180, 360,
+            _cv2.ellipse(bev, (rcx, rcy), (r_px, r_px), 0, 180, 360,
                          (80, 80, 80), 1, _cv2.LINE_AA)
-            _cv2.putText(image, "{}m".format(int(r_m)),
+            _cv2.putText(bev, "{}m".format(int(r_m)),
                          (rcx + 3, rcy - r_px + 5),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
 
-        # --- LiDAR point cloud ---
+        # LiDAR point cloud
         if has_lidar:
             lx = self._lidar_ranges.get("x")
             ly = self._lidar_ranges.get("y")
@@ -916,56 +900,45 @@ class SocialNavigator:
                 ly = np.asarray(ly, dtype=np.float64)
                 lz = np.asarray(lz, dtype=np.float64)
                 if lx.size > 0:
-                    # Filter: finite values only
                     mask = np.isfinite(lx) & np.isfinite(ly) & np.isfinite(lz)
-                    # Filter: remove origin noise
                     dist_sq = lx ** 2 + ly ** 2 + lz ** 2
                     mask &= dist_sq > 0.01 ** 2
-                    # Filter: forward, within BEV range, BEV-specific Z band
                     mask &= lx > 0
                     mask &= (lx ** 2 + ly ** 2) <= bev_range ** 2
                     mask &= ((lz >= self.params["bev_z_min"])
                              & (lz <= self.params["bev_z_max"]))
 
-                    fx = lx[mask]
-                    fy = ly[mask]
-                    fz = lz[mask]
+                    fx, fy, fz = lx[mask], ly[mask], lz[mask]
 
                     if len(fx) > 0:
-                        # Robot frame → BEV pixel (x=forward, y=left)
                         px_arr = (rcx + (-fy) * scale).astype(np.int32)
                         py_arr = (rcy - fx * scale).astype(np.int32)
 
-                        # Clip to minimap bounds
-                        in_bounds = ((px_arr >= x0) & (px_arr < x0 + sz)
-                                     & (py_arr >= y0) & (py_arr < y0 + sz))
+                        in_bounds = ((px_arr >= 0) & (px_arr < sz)
+                                     & (py_arr >= 0) & (py_arr < sz))
                         px_arr = px_arr[in_bounds]
                         py_arr = py_arr[in_bounds]
                         fz = fz[in_bounds]
 
-                        # Z-height colormap (JET)
                         z_min, z_max = fz.min(), fz.max()
                         z_span = z_max - z_min if (z_max - z_min) > 1e-3 else 1.0
                         z_norm = ((fz - z_min) / z_span * 255).astype(np.uint8)
                         colors = _cv2.applyColorMap(
                             z_norm.reshape(-1, 1), _cv2.COLORMAP_JET
                         ).reshape(-1, 3)
+                        bev[py_arr, px_arr] = colors
 
-                        # Direct 1px pixel writes (fast + clean)
-                        image[py_arr, px_arr] = colors
-
-        # Robot marker (on top of lidar points)
-        _cv2.drawMarker(image, (rcx, rcy), (0, 255, 0),
+        # Robot marker
+        _cv2.drawMarker(bev, (rcx, rcy), (0, 255, 0),
                         _cv2.MARKER_TRIANGLE_UP, 24, 2)
 
-        # Label
-        _cv2.putText(image, "Bird's Eye View", (x0 + 10, y0 + 25),
+        _cv2.putText(bev, "Bird's Eye View", (10, 25),
                      _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
         # Robot motion-vector curves
         for vec, color in [
-            (self._motion_original,  (255, 255, 0)),   # cyan  (BGR) = original
-            (self._motion_modulated, (0, 255, 255)),    # yellow (BGR) = modulated
+            (self._motion_original,  (255, 255, 0)),
+            (self._motion_modulated, (0, 255, 255)),
         ]:
             if vec is None:
                 continue
@@ -974,11 +947,12 @@ class SocialNavigator:
             for pt in path:
                 px = int(rcx + pt[0] * scale)
                 py = int(rcy - pt[1] * scale)
-                if not (x0 <= px <= x0 + sz and y0 <= py <= y0 + sz):
+                if not (0 <= px < sz and 0 <= py < sz):
                     break
-                _cv2.line(image, prev, (px, py), color, 2, _cv2.LINE_AA)
+                _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
                 prev = (px, py)
 
+        # Tracked humans
         for human in self._tracked_humans.values():
             if human.position_rf is None:
                 continue
@@ -987,23 +961,37 @@ class SocialNavigator:
             px = int(rcx + xl * scale)
             py = int(rcy - dp * scale)
 
-            if not (x0 <= px <= x0 + sz and y0 <= py <= y0 + sz):
+            if not (0 <= px < sz and 0 <= py < sz):
                 continue
 
-            # Human dot + ID label
-            _cv2.circle(image, (px, py), 8, (0, 0, 255), -1)
-            _cv2.putText(image, str(human.track_id), (px + 10, py - 4),
+            _cv2.circle(bev, (px, py), 8, (0, 0, 255), -1)
+            _cv2.putText(bev, str(human.track_id), (px + 10, py - 4),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-            # Predicted trajectory dots
             if human.predicted_path:
                 for pt in human.predicted_path:
                     tx = int(rcx + pt[0] * scale)
                     ty = int(rcy - pt[1] * scale)
-                    if x0 <= tx <= x0 + sz and y0 <= ty <= y0 + sz:
-                        _cv2.circle(image, (tx, ty), 4, (0, 165, 255), -1)
+                    if 0 <= tx < sz and 0 <= ty < sz:
+                        _cv2.circle(bev, (tx, ty), 4, (0, 165, 255), -1)
 
-        return image
+        return bev
+
+    # def draw_bev(self, image, show_heatmap=False):
+    #     """Draw bird's-eye-view as overlay on bottom-right of image (legacy)."""
+    #     import cv2 as _cv2
+    #     sz = 600
+    #     margin = 10
+    #     h, w = image.shape[:2]
+    #     if w < sz + margin or h < sz + margin:
+    #         return image
+    #     x0 = w - sz - margin
+    #     y0 = h - sz - margin
+    #     bev = self.render_bev(show_heatmap=show_heatmap)
+    #     # blend onto camera image
+    #     roi = image[y0:y0+sz, x0:x0+sz]
+    #     _cv2.addWeighted(bev, 0.7, roi, 0.3, 0, roi)
+    #     return image
 
     # ================================================================== #
     #  Safety heatmap (shared by deploy + simulation)                     #

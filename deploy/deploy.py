@@ -309,8 +309,12 @@ class MotionControlThread(threading.Thread):
         while self.running:
             try:
                 if self.controller.crowdnav_sim_mode:
+                    tick_start = time.perf_counter()
                     self._crowdnav_tick()
-                    time.sleep(self.controller.crowdnav_provider.time_step)
+                    elapsed = time.perf_counter() - tick_start
+                    remaining = self.controller.crowdnav_provider.time_step - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
                 else:
                     state = self.result_queue.get(timeout=1)
                     with self.controller.motion_lock:
@@ -499,12 +503,15 @@ class VisualLanguageController:
         self.font_style = ("Arial", 16, "bold")
         self.small_font = ("Arial", 14, "bold")  # Font for frequency display
 
-        # Create left (image) and right (instruction) frames
+        # Create left (image + BEV) and right (instruction) frames
         self.image_frame = Frame(self.root)
-        self.image_frame.pack(side='left', fill='both', expand=True)
+        self.image_frame.pack(side='left', fill='both', expand=False)
+
+        self.bev_frame = Frame(self.root)
+        self.bev_frame.pack(side='left', anchor='se', padx=5, pady=5)
 
         self.instruction_frame = Frame(self.root)
-        self.instruction_frame.pack(side='right', fill='both', expand=True)
+        self.instruction_frame.pack(side='top', anchor='ne', expand=False)
 
         self.init_ui()
 
@@ -512,6 +519,10 @@ class VisualLanguageController:
         if show_video:
             self.image_label = Label(self.image_frame)
             self.image_label.pack(fill='both', expand=True)
+
+            self.bev_label = Label(self.bev_frame)
+            self.bev_label.pack()
+
             self.update_image()
         if self.simulation_mode:
             self.webcam = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
@@ -528,10 +539,11 @@ class VisualLanguageController:
     def init_ui(self):
         """Initialize UI Interface"""
         screen_width = self.root.winfo_screenwidth()
-        window_width = 1800
-        window_height = 1000
+        window_width = 1400
+        window_height = 800
         # Set window position (right-aligned) and size
-        self.root.geometry(f"{window_width}x{window_height}+{screen_width - 1850}+20")
+        # self.root.geometry(f"{window_width}x{window_height}+{screen_width - 1850}+20")
+        self.root.geometry(f"{window_width}x{window_height}+{0}+20")
 
         # Robot control buttons (top of right frame)
         control_frame = Frame(self.instruction_frame)
@@ -962,10 +974,6 @@ class VisualLanguageController:
                         cv2.line(image, pt1, pt2, (0, 255, 0), 2)  # Green skeleton lines
 
 
-        # Draw Birds-eye view mini-map
-        if hasattr(self, 'social_nav') and self.social_nav.enabled:
-            image = self.social_nav.draw_bev(image, show_heatmap=True)
-
         # Draw status information with black background
         texts = [
             f"Mission Instruction 1: {self.mission_instruction_1}",
@@ -1031,10 +1039,18 @@ class VisualLanguageController:
                 img = self._show_results(img)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(img)
-                img = img.resize((1200, 800), Image.LANCZOS)
+                img = img.resize((1000, 800), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(image=img)
                 self.image_label.config(image=photo)
                 self.image_label.image = photo
+
+                # Render BEV in its own panel
+                if hasattr(self, 'social_nav') and self.social_nav.enabled:
+                    bev = self.social_nav.render_bev(show_heatmap=True)
+                    bev = cv2.cvtColor(bev, cv2.COLOR_BGR2RGB)
+                    bev_photo = ImageTk.PhotoImage(image=Image.fromarray(bev))
+                    self.bev_label.config(image=bev_photo)
+                    self.bev_label.image = bev_photo
         except queue.Empty:
             pass
         except Exception as e:

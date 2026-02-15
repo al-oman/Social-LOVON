@@ -259,7 +259,7 @@ class CrowdNavDataProvider:
         from matplotlib import patches
         self._plt = plt
         self._patches = patches
-        self._fig, self._ax = plt.subplots(figsize=(7, 7))
+        self._fig, self._ax = plt.subplots(figsize=(5, 5))
         self._step_num = 0
 
     def render_frame(self):
