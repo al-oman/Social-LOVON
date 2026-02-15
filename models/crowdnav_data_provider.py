@@ -20,12 +20,13 @@ class CrowdNavDataProvider:
     HUMAN_WIDTH = 0.5       # meters, for bbox projection
     HUMAN_HEIGHT = 1.7      # meters, for bbox projection
     LIDAR_PTS_PER_HUMAN = 15
-    LIDAR_NOISE_SCALE = 0.0 # fraction of human radius used as gaussian std dev
+    LIDAR_NOISE_SCALE = 0.25 # fraction of human radius used as gaussian std dev
 
     def __init__(self, env_config_path, policy_config_path,
                  fov_deg=120.0, target_object="handbag"):
         # Camera model uses display dimensions so bounding boxes
         # align with the blank frame shown in the deploy GUI.
+
         self.image_width = self.DISPLAY_WIDTH
         self.image_height = self.DISPLAY_HEIGHT
         self.fov_deg = fov_deg
@@ -34,7 +35,8 @@ class CrowdNavDataProvider:
         self._cx = self.image_width / 2.0
         self._cy = self.image_height / 2.0
 
-        self.target_object = target_object
+        # self.target_object = target_object
+        self.target_object = "handbag"
 
         # --- Read kinematics from policy config ---
         policy_config = configparser.RawConfigParser()

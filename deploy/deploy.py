@@ -556,7 +556,7 @@ class VisualLanguageController:
 
         # Mission instruction input area
         initial_instructions = [
-            "Run to the bus at speed of 0.36 m/s",
+            "move to the bag at speed of 1.0 m/s"
             # "move to the person at speed of 0.7 m/s",
             # "Run to the human at speed of 0.5 m/s",
             # "run to the chair at speed of 0.4 m/s",
@@ -1039,7 +1039,7 @@ class VisualLanguageController:
                 img = self._show_results(img)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(img)
-                img = img.resize((1000, 800), Image.LANCZOS)
+                img = img.resize((800, 600), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(image=img)
                 self.image_label.config(image=photo)
                 self.image_label.image = photo

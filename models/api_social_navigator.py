@@ -149,6 +149,7 @@ class SocialNavigator:
         # --- Action shield info ---
         self.shield_active = False
         self.safety_score = 1.0      # 1.0 = fully safe, 0.0 = imminent collision
+        self.grid = None
 
         # --- Motion vectors (for BEV drawing) ---
         self._motion_original = None
@@ -199,7 +200,6 @@ class SocialNavigator:
 
         self._frame_count += 1
         self._lidar_ranges = lidar_ranges
-
         # 1. Parse detections from pose_state
         detections = self._parse_pose_state(pose_state)
 
@@ -256,7 +256,6 @@ class SocialNavigator:
 
         self._frame_count += 1
         self._lidar_ranges = None
-
         # --- Directly populate _tracked_humans (bypass stages 1-3) ---
         self._tracked_humans.clear()
         for gh in gt_humans:
@@ -771,11 +770,14 @@ class SocialNavigator:
         """
         Returns true if the shield should be activated
         """
+
+        # logic to handle ensuring the shield only activates when mission state is running
         allowed = self.params["shield_active_states"]
+        print(allowed)
         if mission_state not in allowed:
             return False
-
-        return self.safety_score < self.params["shield_thresh"]
+        shield_state = self.safety_score < self.params["shield_thresh"]
+        return shield_state
 
     # ================================================================== #
     #  STAGE 7 -- Command correction (action shield)                       #
@@ -804,15 +806,39 @@ class SocialNavigator:
         # ---- PLACEHOLDER LOGIC ----
         vy_correction = 0
         vx_correction = 0
+        omega_correction = self._potential_field_correction()
         vy_corrected = vy + vy_correction
         vx_corrected = vx + vx_correction
-
+        omega_corrected = omega + omega_correction
+        print(omega_correction)
         logger.info(
-            "SHIELD  threat=%.2f  brake=%.2f  vx_corr=%.3f  vy %.3f->%.3f",
-            threat, vx_correction, vy, vy_corrected,
+            "SHIELD  threat=%.2f  omega_corr=%.3f  omega %.3f->%.3f",
+            threat, omega_correction, omega, omega_corrected,
         )
-
-        return [vx_corrected, vy_corrected, omega]
+        return [vx_corrected, vy_corrected, omega_corrected]
+    
+    def _potential_field_correction(self):
+        """
+        Compute angular correction to steer toward safer areas.
+        Grid: robot at bottom-middle, y-axis points forward, x-axis points right
+        """
+        robot_i = 0  # bottom row
+        robot_j = self.grid.shape[1] // 2  # middle column
+        
+        # Compute gradient (points toward higher safety)
+        grad_y, grad_x = np.gradient(self.grid)
+        
+        # Safety gradient at robot position
+        safety_grad_x = grad_x[robot_i, robot_j]  # right is positive
+        safety_grad_y = grad_y[robot_i, robot_j]  # forward is positive
+        
+        # Convert to angular correction
+        # If danger on right (grad_x < 0), turn left (omega > 0)
+        # If danger on left (grad_x > 0), turn right (omega < 0)
+        omega_gain = 10.0  # TODO: tune this parameter
+        omega_correction = -omega_gain * safety_grad_x
+        
+        return omega_correction
 
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
@@ -858,17 +884,17 @@ class SocialNavigator:
 
         # Safety heatmap underlay
         if show_heatmap:
-            grid, extent = self.get_safety_heatmap(
+            self.grid, extent = self.get_safety_heatmap(
                 xlim=(-bev_range / 2, bev_range / 2),
                 ylim=(0, bev_range),
                 resolution=bev_range / 50,
             )
-            if grid is not None:
+            if self.grid is not None:
                 if not hasattr(self, '_bev_cmap'):
                     import matplotlib
                     matplotlib.use('Agg')
                     self._bev_cmap = matplotlib.cm.get_cmap('RdYlGn')
-                rgba = self._bev_cmap(grid)[:, :, :3]
+                rgba = self._bev_cmap(self.grid)[:, :, :3]
                 hm_bgr = (rgba[:, :, ::-1] * 255).astype(np.uint8)
                 inner = sz - 2 * pad
                 hm_bgr = _cv2.resize(hm_bgr, (inner, inner), interpolation=_cv2.INTER_NEAREST)
@@ -936,14 +962,16 @@ class SocialNavigator:
                      _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
 
         # Robot motion-vector curves
-        for vec, color in [
-            (self._motion_original,  (255, 255, 0)),
-            (self._motion_modulated, (0, 255, 255)),
+        path_tips = {}  # key: "original" or "corrected" -> (px, py)
+        for vec, color, key in [
+            (self._motion_original,  (255, 255, 0),  "original"),
+            (self._motion_modulated, (0, 255, 255),  "corrected"),
         ]:
             if vec is None:
                 continue
             path = self._extrapolate_robot_path(vec)
             prev = (rcx, rcy)
+            tip = prev
             for pt in path:
                 px = int(rcx + pt[0] * scale)
                 py = int(rcy - pt[1] * scale)
@@ -951,6 +979,26 @@ class SocialNavigator:
                     break
                 _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
                 prev = (px, py)
+                tip = prev
+            path_tips[key] = tip
+
+        # Correction arrow: original tip -> corrected tip (magenta)
+        if self.shield_active and "original" in path_tips and "corrected" in path_tips:
+            o_tip = path_tips["original"]
+            c_tip = path_tips["corrected"]
+            if o_tip != c_tip:
+                _cv2.arrowedLine(bev, o_tip, c_tip,
+                                 (255, 0, 255), 2, _cv2.LINE_AA, tipLength=0.3)
+
+        # Legend
+        lx, ly = 10, sz - 60
+        for label, color in [("Original", (255, 255, 0)),
+                              ("Corrected", (0, 255, 255)),
+                              ("Correction", (255, 0, 255))]:
+            _cv2.line(bev, (lx, ly), (lx + 20, ly), color, 2, _cv2.LINE_AA)
+            _cv2.putText(bev, label, (lx + 25, ly + 4),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+            ly += 16
 
         # Tracked humans
         for human in self._tracked_humans.values():
@@ -1017,6 +1065,7 @@ class SocialNavigator:
             extent:      [xmin, xmax, ymin, ymax] for imshow
             Returns (None, None) if no humans are tracked.
         """
+
         human_positions = [
             tuple(h.position_rf)
             for h in self._tracked_humans.values()
@@ -1034,9 +1083,9 @@ class SocialNavigator:
             if h.predicted_path
         }
 
-        grid, extent = compute_safety_grid(
+        self.grid, extent = compute_safety_grid(
             human_positions, xlim, ylim,
             resolution=resolution,
             human_predicted_paths=human_predicted_paths or None,
         )
-        return grid, extent
+        return self.grid, extent
