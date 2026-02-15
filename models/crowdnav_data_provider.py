@@ -265,6 +265,7 @@ class CrowdNavDataProvider:
         self._step_num = 0
 
     def render_frame(self):
+        """Render top-down view and return BGR image (no cv2.imshow)."""
         plt = self._plt
         patches = self._patches
         ax = self._ax
@@ -300,9 +301,8 @@ class CrowdNavDataProvider:
         self._step_num += 1
         ax.set_title(f'Step {self._step_num}  t={self.env.global_time:.2f}s')
 
-        # Render to buffer and display via cv2 (thread-safe)
+        # Render to buffer and return BGR image
         self._fig.canvas.draw()
         buf = self._fig.canvas.buffer_rgba()
         img = np.asarray(buf)[:, :, :3][:, :, ::-1].copy()  # RGBA → BGR
-        cv2.imshow("CrowdNav", img)
-        cv2.waitKey(1)
+        return img

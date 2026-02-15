@@ -367,7 +367,7 @@ class MotionControlThread(threading.Thread):
         with c.motion_lock:
             c._update_motion_control(state, lidar_cloud=synthetic["lidar"])
 
-        c.crowdnav_provider.render_frame()
+        c.crowdnav_sim_frame = c.crowdnav_provider.render_frame()
 
     def stop(self):
         self.running = False
@@ -519,6 +519,11 @@ class VisualLanguageController:
         if show_video:
             self.image_label = Label(self.image_frame)
             self.image_label.pack(fill='both', expand=True)
+
+            if self.crowdnav_sim_mode:
+                self.crowdnav_label = Label(self.bev_frame)
+                self.crowdnav_label.pack(pady=(0, 5))
+                self.crowdnav_sim_frame = None
 
             self.bev_label = Label(self.bev_frame)
             self.bev_label.pack()
@@ -1043,6 +1048,14 @@ class VisualLanguageController:
                 photo = ImageTk.PhotoImage(image=img)
                 self.image_label.config(image=photo)
                 self.image_label.image = photo
+
+                # Render CrowdNav sim view above BEV
+                if self.crowdnav_sim_mode and self.crowdnav_sim_frame is not None:
+                    sim_rgb = cv2.cvtColor(self.crowdnav_sim_frame, cv2.COLOR_BGR2RGB)
+                    sim_img = Image.fromarray(sim_rgb).resize((400, 400), Image.LANCZOS)
+                    sim_photo = ImageTk.PhotoImage(image=sim_img)
+                    self.crowdnav_label.config(image=sim_photo)
+                    self.crowdnav_label.image = sim_photo
 
                 # Render BEV in its own panel
                 if hasattr(self, 'social_nav') and self.social_nav.enabled:

@@ -5,14 +5,16 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 import numpy as np
-import pyrealsense2 as rs
+# import pyrealsense2 as rs
 import time
 import torch
 import threading
 import queue
 import argparse
 from ultralytics import YOLO
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+import struct
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
 from unitree_sdk2py.go2.video.video_client import VideoClient as Go2VideoClient
 from unitree_sdk2py.go2.sport.sport_client import SportClient as Go2SportClient
 from unitree_sdk2py.h1.loco.h1_loco_client import LocoClient as H1SportClient
@@ -24,6 +26,7 @@ from unitree_sdk2py.b2.back_video.back_video_client import BackVideoClient as B2
 
 from models.api_object_extraction import SequenceToSequenceClassAPI
 from models.api_language2mostion import MotionPredictor
+from models.api_social_navigator import SocialNavigator
 
 from tkinter import Tk, Entry, Button, Label, Frame
 from PIL import Image, ImageTk
@@ -34,6 +37,83 @@ logging.getLogger('ultralytics').setLevel(logging.ERROR)
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+DTYPE_TO_STRUCT = {
+    1: 'b', 2: 'B', 3: 'h', 4: 'H',
+    5: 'i', 6: 'I', 7: 'f', 8: 'd',
+}
+
+def pointcloud2_to_array(msg: PointCloud2_):
+    """Parse a PointCloud2_ message into a dict of numpy arrays."""
+    data = bytearray(msg.data)
+    n_points = msg.width * msg.height
+    result = {}
+    for field in msg.fields:
+        fmt = DTYPE_TO_STRUCT[field.datatype]
+        size = struct.calcsize(fmt)
+        values = []
+        for i in range(n_points):
+            offset = i * msg.point_step + field.offset
+            values.append(struct.unpack_from(fmt, data, offset)[0])
+        result[field.name] = np.array(values)
+    return result
+
+
+class LiDARGetterThread(threading.Thread):
+    """LiDAR Point Cloud Acquisition Thread"""
+
+    def __init__(self, controller):
+        super().__init__()
+        self.controller = controller
+        self.running = True
+        self.lidar_lock = threading.Lock()
+        self.latest_cloud = None
+        self.freq_start = time.time()
+        self.freq_count = 0
+
+    def run(self):
+        self._sub = ChannelSubscriber('rt/utlidar/cloud', PointCloud2_)
+        self._sub.Init(handler=self._on_pointcloud, queueLen=10)
+        while self.running:
+            time.sleep(0.5)
+
+    def _on_pointcloud(self, msg: PointCloud2_):
+        try:
+            cloud = pointcloud2_to_array(msg)
+            #pretty sure this is right
+            cloud['x'] = -cloud['x']
+            # cloud['y'] = -cloud['y']
+            with self.lidar_lock:
+                self.latest_cloud = cloud
+
+            self.freq_count += 1
+            now = time.time()
+            if now - self.freq_start >= 1.0:
+                freq = self.freq_count / (now - self.freq_start)
+                # Diagnostic: log field names, point count, and value ranges
+                fields = list(cloud.keys())
+                n_pts = len(next(iter(cloud.values()))) if cloud else 0
+                diag = f"[LiDARGetter] {freq:.1f} Hz | {n_pts} pts | fields={fields}"
+                for k, v in cloud.items():
+                    if len(v) > 0:
+                        diag += f" | {k}:[{v.min():.2f}, {v.max():.2f}]"
+                print(diag)
+                with self.controller.freq_lock:
+                    self.controller.lidar_getter_freq = freq
+                self.freq_start = now
+                self.freq_count = 0
+        except Exception as e:
+            print(f"LiDARGetter Error: {e}")
+
+    def get_cloud(self):
+        with self.lidar_lock:
+            if self.latest_cloud is None:
+                return None
+            return {k: v.copy() for k, v in self.latest_cloud.items()}
+
+    def stop(self):
+        self.running = False
+        self.join()
+
 
 class ImageGetterThread(threading.Thread):
     """Image Acquisition Thread"""
@@ -43,16 +123,20 @@ class ImageGetterThread(threading.Thread):
         self.controller = controller
         self.running = True
         self.image_queue = queue.Queue(maxsize=1)  # Keep only the latest frame
+        self.pose_image_queue = queue.Queue(maxsize=1)  # Separate queue for pose processing if needed
         self.freq_start = time.time()
         self.freq_count = 0
 
     def run(self):
         while self.running:
             try:
-                if self.controller.camera_type == "inner":
+                if self.controller.simulation_mode:
+                    self.controller._update_image_from_webcam()
+                elif self.controller.camera_type == "inner":
                     self.controller._update_image_from_video_client()
                 elif self.controller.camera_type == "realsense":
                     self.controller._update_image_from_realsense()
+                    
 
                 # Ensure only the latest frame is kept in the queue
                 with self.controller.image_lock:
@@ -68,13 +152,24 @@ class ImageGetterThread(threading.Thread):
                             current_image, threshold=self.controller.blur_threshold
                         )
                         if not is_blur:
-                            # Only put clear images into the queue
                             self.image_queue.put(current_image)
+                            # Also feed pose queue
+                            if not self.pose_image_queue.empty():
+                                try:
+                                    self.pose_image_queue.get_nowait()
+                                except queue.Empty:
+                                    pass
+                            self.pose_image_queue.put(current_image.copy())
                             self.last_image = current_image
                         else:
-                            # Discard blurry image and use the last clear one if available
                             if hasattr(self, 'last_image'):
                                 self.image_queue.put(self.last_image)
+                                if not self.pose_image_queue.empty():
+                                    try:
+                                        self.pose_image_queue.get_nowait()
+                                    except queue.Empty:
+                                        pass
+                                self.pose_image_queue.put(self.last_image.copy())
                             else:
                                 print("No clear image available to use as fallback.")
 
@@ -103,8 +198,8 @@ class ImageGetterThread(threading.Thread):
         is_blur = laplacian_var < threshold
         
         # Print detection result
-        print(f"Laplacian Variance: {laplacian_var:.2f}")
-        print("Image is blurry, discarding" if is_blur else "Image is clear")
+        # print(f"Laplacian Variance: {laplacian_var:.2f}")
+        # print("Image is blurry, discarding" if is_blur else "Image is clear")
         return laplacian_var, is_blur
     
     def stop(self):
@@ -155,6 +250,49 @@ class YoloProcessingThread(threading.Thread):
         self.join()
 
 
+class YoloPoseProcessingThread(threading.Thread):
+    """YOLO Pose Detection Processing Thread"""
+
+    def __init__(self, controller):
+        super().__init__()
+        self.controller = controller
+        self.running = True
+        self.image_queue = controller.image_getter_thread.pose_image_queue
+        self.result_queue = queue.Queue()
+        self.freq_start = time.time()
+        self.freq_count = 0
+
+    def run(self):
+        while self.running:
+            try:
+                image = self.image_queue.get(timeout=1)
+                with self.controller.yolo_pose_lock:
+                    results = self.controller.yolo_pose_model(image)
+                    # Process pose detection results
+                    self.controller._yolo_pose_post_process(results, image)
+
+                self.result_queue.put(self.controller.pose_state.copy())
+
+                self.freq_count += 1
+                if time.time() - self.freq_start >= 1:
+                    freq = self.freq_count / (time.time() - self.freq_start)
+                    print(f"[YoloPoseProcessor] Frequency: {freq:.2f} Hz")
+                    with self.controller.freq_lock:
+                        self.controller.yolo_pose_processor_freq = freq
+                    self.freq_start = time.time()
+                    self.freq_count = 0
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"YoloPoseProcessing Error: {e}")
+                time.sleep(0.1)
+
+    def stop(self):
+        self.running = False
+        self.join()
+
+
 class MotionControlThread(threading.Thread):
     """Robot Motion Control Thread"""
 
@@ -162,17 +300,26 @@ class MotionControlThread(threading.Thread):
         super().__init__()
         self.controller = controller
         self.running = True
-        self.result_queue = controller.yolo_processing_thread.result_queue
+        if not controller.crowdnav_sim_mode:
+            self.result_queue = controller.yolo_processing_thread.result_queue
         self.freq_start = time.time()
         self.freq_count = 0
 
     def run(self):
         while self.running:
             try:
-                state = self.result_queue.get(timeout=1)
-                with self.controller.motion_lock:
-                    self.controller._update_motion_control(state)
-                    self.controller._control_robot()
+                if self.controller.crowdnav_sim_mode:
+                    tick_start = time.perf_counter()
+                    self._crowdnav_tick()
+                    elapsed = time.perf_counter() - tick_start
+                    remaining = self.controller.crowdnav_provider.time_step - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
+                else:
+                    state = self.result_queue.get(timeout=1)
+                    with self.controller.motion_lock:
+                        self.controller._update_motion_control(state)
+                        self.controller._control_robot()
 
                 self.freq_count += 1
                 if time.time() - self.freq_start >= 1:
@@ -186,8 +333,41 @@ class MotionControlThread(threading.Thread):
             except queue.Empty:
                 continue
             except Exception as e:
+                import traceback
                 print(f"MotionControl Error: {e}")
+                traceback.print_exc()
                 time.sleep(0.1)
+
+    def _crowdnav_tick(self):
+        c = self.controller
+        mv = c.motion_vector if hasattr(c, 'motion_vector') else [0.0, 0.0, 0.0]
+        synthetic = c.crowdnav_provider.step(mv)
+        if synthetic is None:
+            print("CrowdNav episode finished.")
+            self.running = False
+            return
+
+        # Update controller state from synthetic data
+        c.pose_state = synthetic["pose_state"]
+        c.state.update(synthetic["object_state"])
+
+        # Push blank frame to GUI image queue
+        frame = c.crowdnav_provider.get_blank_frame()
+        img_q = c.image_getter_thread.image_queue
+        if not img_q.empty():
+            try:
+                img_q.get_nowait()
+            except queue.Empty:
+                pass
+        img_q.put(frame)
+
+        # Build L2MM input: merge current state with synthetic object fields
+        state = {**c.state}
+
+        with c.motion_lock:
+            c._update_motion_control(state, lidar_cloud=synthetic["lidar"])
+
+        c.crowdnav_provider.render_frame()
 
     def stop(self):
         self.running = False
@@ -195,7 +375,8 @@ class MotionControlThread(threading.Thread):
 
 
 class VisualLanguageController:
-    def __init__(self, yolo_model_dir="yolo-models/yolo11n.pt", 
+    def __init__(self, yolo_model_dir="yolo-models/yolo11n.pt",
+                 yolo_pose_model_dir="yolo-models/yolo26n-pose.pt", 
                  tokenizer_path=None, 
                  object_extraction_model_path=None, 
                  language2motion_model_path=None,
@@ -205,14 +386,20 @@ class VisualLanguageController:
                  show_max_result=False,
                  show_arrowed=False,
                  blur_threshold=10.0,
-                 lengthen_filter=3):
+                 lengthen_filter=3,
+                 simulation_mode=False, 
+                 socialnav_enabled=False,
+                 network_device="enp8s0",
+                 crowdnav_sim_mode=False):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
             model_path=object_extraction_model_path,
             tokenizer_path=tokenizer_path
         )
-        self.yolo_model = YOLO(yolo_model_dir)
+        if not crowdnav_sim_mode:
+            self.yolo_model = YOLO(yolo_model_dir)
+            self.yolo_pose_model = YOLO(yolo_pose_model_dir)
         self.motion_predictor = MotionPredictor(
             model_path=language2motion_model_path,
             tokenizer_path=tokenizer_path
@@ -226,20 +413,24 @@ class VisualLanguageController:
         self.robot_type = robot_type
         self.blur_threshold = blur_threshold  # Threshold for blur detection
         self.lengthen_filter = lengthen_filter  # Number of historical detection results to keep
-
+        self.simulation_mode = simulation_mode  # Whether to run in simulation mode
+        self.socialnav_enabled = socialnav_enabled  # Whether to enable social navigation adjustments
         self.button_update_inst = False
+        self.network_device = network_device
+        self.crowdnav_sim_mode = crowdnav_sim_mode
 
         # Initialize RealSense camera if selected
-        if self.camera_type == "realsense":
-            self.pipeline = rs.pipeline()
-            self.config = rs.config()
-            self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 15)
-            self.pipeline.start(self.config)
+        # if self.camera_type == "realsense":
+        #     self.pipeline = rs.pipeline()
+        #     self.config = rs.config()
+        #     self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 15)
+        #     self.pipeline.start(self.config)
 
         # Initialize Unitree SDK components
-        self._init_channel_factory()
-        self.video_client = self._init_camera()
-        self.sport_client = self._init_sport()
+        if not self.simulation_mode and not self.crowdnav_sim_mode:
+            self._init_channel_factory()
+            self.video_client = self._init_camera()
+            self.sport_client = self._init_sport()
 
         # Initialize mission instructions and state
         self.mission_instruction_0 = "run to the person at speed of 0.36 m/s"
@@ -251,24 +442,60 @@ class VisualLanguageController:
             "object_whn": [0.00, 0.00],
             "mission_state_in": "success",
             "search_state_in": "had_searching_1",
+            "bounding_box": None,
         }
         self.extracted_object = self.object_extractor.predict(self.mission_instruction_1)
+
+        self.pose_state = {
+            "num_people": 0,
+            "poses": [],
+            "pose_boxes": [],
+        }
 
         # Initialize thread locks
         self.image_lock = threading.Lock()
         self.yolo_lock = threading.Lock()
+        self.yolo_pose_lock = threading.Lock()
         self.motion_lock = threading.Lock()
         self.freq_lock = threading.Lock()  # Lock for frequency updates
 
         # Initialize frequency monitoring variables
         self.image_getter_freq = 0.0
         self.yolo_processor_freq = 0.0
+        self.yolo_pose_processor_freq = 0.0
         self.motion_control_freq = 0.0
+        self.lidar_getter_freq = 0.0
+
+        # CrowdNav sim provider (replaces camera + lidar + YOLO)
+        if self.crowdnav_sim_mode:
+            from models.crowdnav_data_provider import CrowdNavDataProvider
+            self.crowdnav_provider = CrowdNavDataProvider(
+                env_config_path=args.env_config,
+                policy_config_path=args.policy_config,
+                target_object=self.extracted_object,
+            )
+            self.crowdnav_provider.reset()
+            self.crowdnav_provider.init_render()
+            self.motion_vector = [0.0, 0.0, 0.0]
 
         # Initialize worker threads
         self.image_getter_thread = ImageGetterThread(self)
-        self.yolo_processing_thread = YoloProcessingThread(self)
+        if not self.crowdnav_sim_mode:
+            self.yolo_processing_thread = YoloProcessingThread(self)
+            self.yolo_pose_processing_thread = YoloPoseProcessingThread(self)
         self.motion_control_thread = MotionControlThread(self)
+        if not self.simulation_mode and not self.crowdnav_sim_mode:
+            self.lidar_getter_thread = LiDARGetterThread(self)
+        else:
+            self.lidar_getter_thread = None
+
+        # Load social navigaton function
+        sn_width = self.crowdnav_provider.image_width if self.crowdnav_sim_mode else args.image_width
+        sn_kwargs = {"image_width": sn_width}
+        if self.crowdnav_sim_mode:
+            sn_kwargs["use_lidar_depth"] = True
+        self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
+                                          **sn_kwargs)
 
         # Initialize UI
         self.root = Tk()
@@ -276,12 +503,15 @@ class VisualLanguageController:
         self.font_style = ("Arial", 16, "bold")
         self.small_font = ("Arial", 14, "bold")  # Font for frequency display
 
-        # Create left (image) and right (instruction) frames
+        # Create left (image + BEV) and right (instruction) frames
         self.image_frame = Frame(self.root)
-        self.image_frame.pack(side='left', fill='both', expand=True)
+        self.image_frame.pack(side='left', fill='both', expand=False)
+
+        self.bev_frame = Frame(self.root)
+        self.bev_frame.pack(side='left', anchor='se', padx=5, pady=5)
 
         self.instruction_frame = Frame(self.root)
-        self.instruction_frame.pack(side='right', fill='both', expand=True)
+        self.instruction_frame.pack(side='top', anchor='ne', expand=False)
 
         self.init_ui()
 
@@ -289,34 +519,53 @@ class VisualLanguageController:
         if show_video:
             self.image_label = Label(self.image_frame)
             self.image_label.pack(fill='both', expand=True)
+
+            self.bev_label = Label(self.bev_frame)
+            self.bev_label.pack()
+
             self.update_image()
+        if self.simulation_mode:
+            self.webcam = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+            if not self.webcam.isOpened():
+                self.webcam = cv2.VideoCapture(0)
+            if not self.webcam.isOpened():
+                print("ERROR: Could not open webcam. Check camera permissions.")
+            else:
+                # Warm up camera
+                for _ in range(5):
+                    self.webcam.read()
+
 
     def init_ui(self):
         """Initialize UI Interface"""
         screen_width = self.root.winfo_screenwidth()
-        window_width = 1800
-        window_height = 1000
+        window_width = 1400
+        window_height = 800
         # Set window position (right-aligned) and size
-        self.root.geometry(f"{window_width}x{window_height}+{screen_width - 1850}+20")
+        # self.root.geometry(f"{window_width}x{window_height}+{screen_width - 1850}+20")
+        self.root.geometry(f"{window_width}x{window_height}+{0}+20")
 
         # Robot control buttons (top of right frame)
         control_frame = Frame(self.instruction_frame)
         control_frame.pack(pady=10, padx=10, anchor='n')
-        Button(control_frame, text="Damp", command=self.sport_client.Damp,
+        # Button(control_frame, text="Damp", command=self.sport_client.Damp,
+        #        font=self.font_style, width=15).pack(side='left', padx=5)
+        Button(control_frame, text="Damp", 
+               command=lambda: print("Damp command") if self.simulation_mode else self.sport_client.Damp, 
                font=self.font_style, width=15).pack(side='left', padx=5)
 
         # Mission instruction input area
         initial_instructions = [
-            "Run to the bus at speed of 0.36 m/s",
-            "move to the person at speed of 0.7 m/s",
-            "Run to the human at speed of 0.5 m/s",
-            "run to the chair at speed of 0.4 m/s",
-            "approach the car at speed of 0.5 m/s",
-            "run to the bicycle at speed of 0.4 m/s",
-            "Rush to the chair at speed of 0.3 m/s",
-            "move to the armchair at speed of 0.35 m/s",
-            "Sprint to the game ball at speed of 0.35 m/s",
-            "Approach to the laptop at speed of 0.3 m/s"
+            "move to the bag at speed of 1.0 m/s"
+            # "move to the person at speed of 0.7 m/s",
+            # "Run to the human at speed of 0.5 m/s",
+            # "run to the chair at speed of 0.4 m/s",
+            # "approach the car at speed of 0.5 m/s",
+            # "run to the bicycle at speed of 0.4 m/s",
+            # "Rush to the chair at speed of 0.3 m/s",
+            # "move to the armchair at speed of 0.35 m/s",
+            # "Sprint to the game ball at speed of 0.35 m/s",
+            # "Approach to the laptop at speed of 0.3 m/s"
         ]
 
         self.instruction_entries = []
@@ -357,9 +606,17 @@ class VisualLanguageController:
                                      font=self.small_font, anchor='w', fg='red')
         self.freq_yolo_label.pack(anchor='w', pady=2)
 
-        self.freq_motion_label = Label(freq_display_frame, text="[MotionControl] Frequency: 0.00 Hz", 
+        self.freq_yolo_pose_label = Label(freq_display_frame, text="[YoloPoseProcessor] Frequency: 0.00 Hz", 
+                                     font=self.small_font, anchor='w', fg='red')
+        self.freq_yolo_pose_label.pack(anchor='w', pady=2)
+
+        self.freq_motion_label = Label(freq_display_frame, text="[MotionControl] Frequency: 0.00 Hz",
                                        font=self.small_font, anchor='w', fg='red')
         self.freq_motion_label.pack(anchor='w', pady=2)
+
+        self.freq_lidar_label = Label(freq_display_frame, text="[LiDARGetter] Frequency: 0.00 Hz",
+                                      font=self.small_font, anchor='w', fg='red')
+        self.freq_lidar_label.pack(anchor='w', pady=2)
 
         self.update_ui_labels()
 
@@ -386,12 +643,16 @@ class VisualLanguageController:
         with self.freq_lock:
             img_freq = f"{self.image_getter_freq:.2f}"
             yolo_freq = f"{self.yolo_processor_freq:.2f}"
+            pose_freq = f"{self.yolo_pose_processor_freq:.2f}"
             motion_freq = f"{self.motion_control_freq:.2f}"
-        
+            lidar_freq = f"{self.lidar_getter_freq:.2f}"
+
         self.freq_image_label.config(text=f"[ImageGetter] Frequency: {img_freq} Hz")
         self.freq_yolo_label.config(text=f"[YoloProcessor] Frequency: {yolo_freq} Hz")
+        self.freq_yolo_pose_label.config(text=f"[YoloPoseProcessor] Frequency: {pose_freq} Hz")
         self.freq_motion_label.config(text=f"[MotionControl] Frequency: {motion_freq} Hz")
-        
+        self.freq_lidar_label.config(text=f"[LiDARGetter] Frequency: {lidar_freq} Hz")
+
         # Refresh every 100ms
         self.root.after(100, self.update_freq_display)
 
@@ -411,7 +672,7 @@ class VisualLanguageController:
     def _init_channel_factory(self):
         """Initialize Unitree Channel Factory"""
         if len(sys.argv) > 1:
-            ChannelFactoryInitialize(0, sys.argv[1])
+            ChannelFactoryInitialize(0,self.network_device)
         else:
             ChannelFactoryInitialize(0)
 
@@ -461,6 +722,19 @@ class VisualLanguageController:
         color_frame = frames.get_color_frame()
         if color_frame:
             self.image = np.asanyarray(color_frame.get_data())
+
+    def _update_image_from_webcam(self):
+        """Update Image from built-in webcam"""
+        if not hasattr(self, 'webcam'):
+            self.webcam = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)  # macOS
+            if not self.webcam.isOpened():
+                self.webcam = cv2.VideoCapture(0)  # fallback
+            if not self.webcam.isOpened():
+                print("ERROR: Could not open webcam")
+                return
+        ret, frame = self.webcam.read()
+        if ret:
+            self.image = frame
 
     def _yolo_image_post_process(self, results, original_image):
         """Process YOLO Detection Results"""
@@ -555,7 +829,40 @@ class VisualLanguageController:
             "bounding_box": avg_xyxy
         })
 
-    def _update_motion_control(self, state):
+    def _yolo_pose_post_process(self, results, original_image):
+        """Process YOLO Pose Detection Results"""
+        poses = []
+        pose_boxes = []
+        
+        for result in results:
+            if result.keypoints is not None:
+                for idx, keypoints in enumerate(result.keypoints):
+                    # Get bounding box
+                    if result.boxes is not None and idx < len(result.boxes):
+                        box = result.boxes[idx]
+                        x1, y1, x2, y2 = box.xyxy[0].tolist()
+                        confidence = float(box.conf)
+                        
+                        # Get keypoints (17 keypoints for COCO format)
+                        kpts = keypoints.xy[0].cpu().numpy()  # Shape: (17, 2)
+                        kpts_conf = keypoints.conf[0].cpu().numpy() if hasattr(keypoints, 'conf') else None
+                        
+                        poses.append({
+                            "keypoints": kpts.tolist(),
+                            "keypoints_conf": kpts_conf.tolist() if kpts_conf is not None else None,
+                            "confidence": confidence
+                        })
+                        
+                        pose_boxes.append([int(x1), int(y1), int(x2), int(y2)])
+        
+        # Update pose state
+        self.pose_state.update({
+            "num_people": len(poses),
+            "poses": poses,
+            "pose_boxes": pose_boxes
+        })
+
+    def _update_motion_control(self, state, lidar_cloud=None):
         """Update Motion Control Parameters Based on Detection Results"""
         input_data = {
             "mission_instruction_0": self.mission_instruction_0,
@@ -567,12 +874,28 @@ class VisualLanguageController:
         self.state["search_state_in"] = prediction["search_state"]
         self.motion_vector = prediction["motion_vector"]
 
+        #-----------------------------------------------------------
+        # Addition of Social Nav element! Adjusts the output of L2MM motion vector
+        #-----------------------------------------------------------
+
+        if lidar_cloud is None:
+            lidar_cloud = self.lidar_getter_thread.get_cloud() if self.lidar_getter_thread else None
+        self.motion_vector = self.social_nav.step(
+            motion_vector=self.motion_vector,
+            pose_state=self.pose_state,
+            mission_state=self.state["mission_state_in"],
+            lidar_ranges=lidar_cloud,
+        )
+
     def _control_robot(self):
         """Send Motion Commands to Robot"""
         if hasattr(self, 'motion_vector'):
             v_x, v_y, w_z = [float(val) for val in self.motion_vector]
-            self.sport_client.Move(v_x, v_y, w_z)
-
+            if self.simulation_mode:
+                print(f"vx={v_x:.4f}, vy={v_y:.4f}, wz={w_z:.4f}")
+            else:
+                self.sport_client.Move(v_x, v_y, w_z)
+            
     def _show_results(self, image):
         """Draw Detection Results and Information on Image"""
         # Draw bounding box if enabled and object detected
@@ -600,6 +923,56 @@ class VisualLanguageController:
                 # Draw reference points
                 cv2.circle(image, image_center, 10, (0, 255, 0), -1)  # Solid circle at center
                 cv2.circle(image, object_center, 10, (0, 255, 255), 2)  # Hollow circle at object
+
+        # Draw pose estimation results
+        if self.pose_state["num_people"] > 0:
+            # COCO keypoint connections (skeleton)
+            skeleton = [
+                [0, 1], [0, 2], [1, 3], [2, 4],  # Head
+                [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],  # Arms
+                [5, 11], [6, 12], [11, 12],  # Torso
+                [11, 13], [13, 15], [12, 14], [14, 16]  # Legs
+            ]
+            
+            for idx, pose in enumerate(self.pose_state["poses"]):
+                keypoints = pose["keypoints"]
+                keypoints_conf = pose["keypoints_conf"]
+                confidence = pose["confidence"]
+                
+                # Draw bounding box for person
+                if idx < len(self.pose_state["pose_boxes"]):
+                    x1, y1, x2, y2 = self.pose_state["pose_boxes"][idx]
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue border
+                    
+                    # Draw label with distance from social nav
+                    dist_str = ""
+                    if hasattr(self, 'social_nav') and self.social_nav.enabled:
+                        h = self.social_nav._tracked_humans.get(idx)
+                        if h and h.distance is not None:
+                            dist_str = f" {h.distance:.1f}m"
+                            if h.position_rf is not None:
+                                dist_str += f"[x_lat, depth]: [{h.position_rf[0]:+.1f}, {h.position_rf[1]:.1f}]"
+                    label = f"Person (confidence, distance): {confidence:.2f}{dist_str}"
+
+                    (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (255, 0, 0), -1)
+                    cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Draw keypoints
+                for i, (x, y) in enumerate(keypoints):
+                    conf = keypoints_conf[i] if keypoints_conf else 1.0
+                    if conf > 0.5:  # Only draw high-confidence keypoints
+                        cv2.circle(image, (int(x), int(y)), 4, (0, 255, 255), -1)  # Yellow keypoints
+                
+                # Draw skeleton connections
+                for connection in skeleton:
+                    pt1_idx, pt2_idx = connection
+                    if (keypoints_conf is None or 
+                        (keypoints_conf[pt1_idx] > 0.5 and keypoints_conf[pt2_idx] > 0.5)):
+                        pt1 = tuple(map(int, keypoints[pt1_idx]))
+                        pt2 = tuple(map(int, keypoints[pt2_idx]))
+                        cv2.line(image, pt1, pt2, (0, 255, 0), 2)  # Green skeleton lines
+
 
         # Draw status information with black background
         texts = [
@@ -633,6 +1006,29 @@ class VisualLanguageController:
             # Draw text
             cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness, cv2.LINE_AA)
 
+        safety_texts = [
+            f"SocialNav Enabled: {self.socialnav_enabled}",
+            ]
+        if hasattr(self, 'social_nav') and self.social_nav.enabled:
+            min_d = self.social_nav.diag["min_distance"]
+            n_humans = self.social_nav.diag["num_humans"]
+            safety_score = self.social_nav.safety_score
+            sheild_active = self.social_nav.shield_active
+
+            safety_texts.append(f"minimum distance: {min_d:.2f} m" if min_d is not None else "minimum distance: n/a")
+            safety_texts.append(f"number of humans: {n_humans}")
+            safety_texts.append(f"safety score: {safety_score:.2f}")
+            safety_texts.append(f"shield active: {sheild_active}")
+        for safety_text, y in zip(safety_texts, y_positions):
+            (text_width, text_height), baseline = cv2.getTextSize(safety_text, font, font_scale, font_thickness)
+            x = image.shape[1] - text_width - 10
+            rect_x = x - padding
+            rect_y = y - text_height - padding
+            rect_width = text_width + 2 * padding
+            rect_height = text_height + baseline + 2 * padding
+            cv2.rectangle(image, (rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height), (0, 0, 0), -1)
+            cv2.putText(image, safety_text, (x, y), font, font_scale, (0, 255, 255), font_thickness, cv2.LINE_AA)
+
         return image
 
     def update_image(self):
@@ -643,10 +1039,18 @@ class VisualLanguageController:
                 img = self._show_results(img)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(img)
-                img = img.resize((1200, 800), Image.LANCZOS)
+                img = img.resize((800, 600), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(image=img)
                 self.image_label.config(image=photo)
                 self.image_label.image = photo
+
+                # Render BEV in its own panel
+                if hasattr(self, 'social_nav') and self.social_nav.enabled:
+                    bev = self.social_nav.render_bev(show_heatmap=True)
+                    bev = cv2.cvtColor(bev, cv2.COLOR_BGR2RGB)
+                    bev_photo = ImageTk.PhotoImage(image=Image.fromarray(bev))
+                    self.bev_label.config(image=bev_photo)
+                    self.bev_label.image = bev_photo
         except queue.Empty:
             pass
         except Exception as e:
@@ -655,15 +1059,25 @@ class VisualLanguageController:
 
     def start_threads(self):
         """Start All Worker Threads"""
-        self.image_getter_thread.start()
-        self.yolo_processing_thread.start()
+        if not self.crowdnav_sim_mode:
+            self.image_getter_thread.start()
+            self.yolo_processing_thread.start()
+            self.yolo_pose_processing_thread.start()
         self.motion_control_thread.start()
+        if self.lidar_getter_thread:
+            self.lidar_getter_thread.start()
 
     def stop_threads(self):
         """Stop All Worker Threads"""
-        self.image_getter_thread.stop()
-        self.yolo_processing_thread.stop()
+        if not self.crowdnav_sim_mode:
+            self.image_getter_thread.stop()
+            self.yolo_processing_thread.stop()
+            self.yolo_pose_processing_thread.stop()
         self.motion_control_thread.stop()
+        if self.lidar_getter_thread:
+            self.lidar_getter_thread.stop()
+        if hasattr(self, 'webcam'):
+            self.webcam.release()
         if self.camera_type == "realsense":
             self.pipeline.stop()
 
@@ -683,6 +1097,8 @@ if __name__ == "__main__":
     # Model paths
     parser.add_argument('--yolo_model_dir', type=str, default="models/yolo-models/yolo11x.pt",
                       help='Path to YOLO model directory')
+    parser.add_argument('--yolo_pose_model_dir', type=str, default="models/yolo-models/yolo26n-pose.pt",
+                      help='Path to YOLO pose model directory')
     parser.add_argument('--tokenizer_path', type=str, default="models/tokenizer_language2motion_n1000000",
                       help='Path to tokenizer')
     parser.add_argument('--object_extraction_model_path', type=str, 
@@ -693,7 +1109,7 @@ if __name__ == "__main__":
                       help='Path to language-to-motion model')
     
     # Hardware configuration
-    parser.add_argument('--camera_type', type=str, default='realsense',
+    parser.add_argument('--camera_type', type=str, default='inner',
                       choices=['inner', 'realsense'], help='Camera type (inner or realsense)')
     parser.add_argument('--robot_type', type=str, default='go2',
                       choices=['go2', 'h1', 'b2'], help='Robot type (go2, h1, or b2)')
@@ -712,11 +1128,27 @@ if __name__ == "__main__":
     parser.add_argument('--lengthen_filter', type=int, default=1,
                       help='Number of historical detection results to keep')
     
+    # Added parameters
+    parser.add_argument('--simulation_mode', action='store_true', default=False,
+                  help='Run in simulation mode (webcam + print commands)')
+    parser.add_argument('--socialnav_enabled', action='store_true', default=False,
+                  help='Enable social navigation adjustments')
+    parser.add_argument('--image_width', type=int, default=640,
+                      help='Width of input images')
+    parser.add_argument('--network_device', type=str, default="enp8s0",
+                      help='Netowrk Card')
+    parser.add_argument('--crowdnav_sim_mode', action='store_true', default=False,
+                help='take input data from CrowdNav simulator')
+    parser.add_argument('--env_config', type=str, default='configs/env_lovon.config',
+                help='CrowdNav environment config file (crowdnav_sim_mode)')
+    parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config',
+                help='CrowdNav policy config file (crowdnav_sim_mode)')
     args = parser.parse_args()
 
     # Initialize and run controller
     controller = VisualLanguageController(
         yolo_model_dir=args.yolo_model_dir,
+        yolo_pose_model_dir=args.yolo_pose_model_dir,
         tokenizer_path=args.tokenizer_path,
         object_extraction_model_path=args.object_extraction_model_path,
         language2motion_model_path=args.language2motion_model_path,
@@ -726,7 +1158,11 @@ if __name__ == "__main__":
         show_max_result=args.show_max_result,
         show_arrowed=args.show_arrowed,
         blur_threshold=args.threshold,
-        lengthen_filter=args.lengthen_filter
+        lengthen_filter=args.lengthen_filter,
+        simulation_mode=args.simulation_mode,
+        socialnav_enabled=args.socialnav_enabled,
+        network_device=args.network_device, 
+        crowdnav_sim_mode=args.crowdnav_sim_mode
     )
     controller.run()
     print("Program terminated.")
