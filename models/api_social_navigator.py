@@ -120,8 +120,8 @@ class SocialNavigator:
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
         # --- BEV minimap display ---
         "bev_range_m": 5.0,            # visible range in BEV (meters), independent of d_max
-        "bev_z_min": -1.0,            # BEV display Z filter min (sensor-relative)
-        "bev_z_max": 1.0,             # BEV display Z filter max (sensor-relative)
+        "bev_z_min": -0.0,            # BEV display Z filter min (sensor-relative)
+        "bev_z_max": 2.0,             # BEV display Z filter max (sensor-relative)
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -413,7 +413,7 @@ class SocialNavigator:
             return None
 
         # Filter: only points in front of the robot (x > 0)
-        mask = lx > 0
+        # mask = lx > 0
 
         # Filter: human-height range (z relative to sensor)
         mask &= (lz >= self.params["lidar_z_min"]) & (lz <= self.params["lidar_z_max"])
@@ -773,7 +773,6 @@ class SocialNavigator:
 
         # logic to handle ensuring the shield only activates when mission state is running
         allowed = self.params["shield_active_states"]
-        print(allowed)
         if mission_state not in allowed:
             return False
         shield_state = self.safety_score < self.params["shield_thresh"]
@@ -881,6 +880,7 @@ class SocialNavigator:
 
         has_lidar = self._lidar_ranges is not None
         has_humans = bool(self._tracked_humans)
+        _lidar_z_min = _lidar_z_max = None
 
         # Safety heatmap underlay
         if show_heatmap:
@@ -953,6 +953,24 @@ class SocialNavigator:
                             z_norm.reshape(-1, 1), _cv2.COLORMAP_JET
                         ).reshape(-1, 3)
                         bev[py_arr, px_arr] = colors
+                        _lidar_z_min, _lidar_z_max = z_min, z_max
+
+        # LiDAR Z-height colorbar legend
+        if has_lidar and _lidar_z_min is not None:
+            cb_x = sz - 30          # right edge
+            cb_y0, cb_y1 = pad, sz - pad
+            cb_h = cb_y1 - cb_y0
+            cb_w = 12
+            gradient = np.linspace(255, 0, cb_h, dtype=np.uint8).reshape(-1, 1)
+            cb_color = _cv2.applyColorMap(gradient, _cv2.COLORMAP_JET)
+            bev[cb_y0:cb_y1, cb_x:cb_x + cb_w] = cb_color
+            _cv2.rectangle(bev, (cb_x, cb_y0), (cb_x + cb_w, cb_y1), (200, 200, 200), 1)
+            _cv2.putText(bev, f"{_lidar_z_max:.1f}m", (cb_x - 40, cb_y0 + 10),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.3, (200, 200, 200), 1)
+            _cv2.putText(bev, f"{_lidar_z_min:.1f}m", (cb_x - 40, cb_y1),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.3, (200, 200, 200), 1)
+            _cv2.putText(bev, "Z", (cb_x + 2, cb_y0 - 5),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
         # Robot marker
         _cv2.drawMarker(bev, (rcx, rcy), (0, 255, 0),

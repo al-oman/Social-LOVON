@@ -236,7 +236,17 @@ class LOVONCrowdPolicy(Policy):
             print('approaching goal!')
             whn = [0.4, 0.4]
         else:
-            whn = [0.1, 0.1] 
+            whn = [0.1, 0.1]
+        # fx = (self.image_width / 2) / np.tan(np.radians(self.fov /2))
+        # object_size = 1.5
+
+        # if goal_dist > 0.05:
+        #     bbox_pixels = object_size*fx / goal_dist
+        #     wn = bbox_pixels / self.image_width
+        #     hn = wn
+        #     whn = [np.clip(wn, 0.01, 0.9), np.clip(hn, 0.01, 0.9)]
+        # else:
+        #     whn = [0.9, 0.9]
 
 
         return xyn, whn
