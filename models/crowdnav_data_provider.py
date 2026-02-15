@@ -231,11 +231,29 @@ class CrowdNavDataProvider:
         xyn = [float(np.clip(x, 0.0, 1.0)), 0.5]
         whn = [0.4, 0.4] if goal_dist < 0.3 else [0.1, 0.1]
 
+        # Compute pixel bounding box for goal marker
+        bounding_box = None
+        x_lat, depth = self._world_to_robot_frame(
+            self_state.gx, self_state.gy,
+            self_state.px, self_state.py, self_state.theta)
+        if depth > 0.1:
+            u = self._fx * (x_lat / depth) + self._cx
+            if 0 <= u <= self.image_width:
+                goal_size_m = 0.3
+                w_px = max(20, self._fx * goal_size_m / depth)
+                h_px = max(20, self._fx * goal_size_m / depth)
+                x1 = int(max(0, u - w_px / 2))
+                x2 = int(min(self.image_width, u + w_px / 2))
+                y1 = int(max(0, self._cy - h_px / 2))
+                y2 = int(min(self.image_height, self._cy + h_px / 2))
+                bounding_box = [x1, y1, x2, y2]
+
         return {
             "predicted_object": self.target_object,
             "confidence": [0.9],
             "object_xyn": xyn,
             "object_whn": whn,
+            "bounding_box": bounding_box,
         }
 
     # ------------------------------------------------------------------

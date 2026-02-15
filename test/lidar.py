@@ -1,6 +1,7 @@
 import struct
 import time
 import threading
+import argparse
 import numpy as np
 import cv2
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -187,39 +188,112 @@ def render(cloud, n_points, freq, range_m):
     return canvas
 
 
+def filter_cloud(cloud):
+    """Apply standard filters to a point cloud dict. Returns filtered x, y, z."""
+    if cloud is None or 'x' not in cloud or 'y' not in cloud:
+        return np.array([]), np.array([]), np.array([])
+    x = cloud['x']
+    y = cloud['y']
+    z = cloud.get('z', np.zeros_like(x))
+
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    dist_sq = x**2 + y**2 + z**2
+    not_origin = dist_sq > (ORIGIN_THRESH ** 2)
+    not_far = dist_sq < (DIST_MAX ** 2)
+    z_ok = (z >= Z_MIN) & (z <= Z_MAX)
+    mask = finite & not_origin & not_far & z_ok
+
+    return x[mask], y[mask], z[mask]
+
+
+# ---------------------------------------------------------------------------
+#  3D matplotlib rendering
+# ---------------------------------------------------------------------------
+def run_3d_viewer():
+    """Live-updating 3D scatter plot of the LiDAR point cloud."""
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+    fig = plt.figure("LiDAR 3D View", figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    scatter = [None]  # mutable container so the timer callback can update it
+
+    def update(_frame=None):
+        with cloud_lock:
+            cloud_snapshot = (
+                {k: v.copy() for k, v in latest_cloud.items()}
+                if latest_cloud else None
+            )
+            n = cloud_count
+        freq = cloud_freq
+
+        xf, yf, zf = filter_cloud(cloud_snapshot)
+
+        ax.cla()
+        ax.set_xlabel('X (forward)')
+        ax.set_ylabel('Y (left)')
+        ax.set_zlabel('Z (up)')
+        ax.set_title(f"Points: {len(xf)} / {n} raw  |  {freq:.1f} Hz")
+
+        if len(xf) > 0:
+            ax.scatter(xf, yf, zf, c=zf, cmap='jet', s=1, depthshade=True)
+            ax.set_xlim(xf.min(), xf.max())
+            ax.set_ylim(yf.min(), yf.max())
+            ax.set_zlim(zf.min(), zf.max())
+        else:
+            ax.set_xlim(-RANGE_M, RANGE_M)
+            ax.set_ylim(-RANGE_M, RANGE_M)
+            ax.set_zlim(Z_MIN, Z_MAX)
+
+        fig.canvas.draw_idle()
+
+    from matplotlib.animation import FuncAnimation
+    _anim = FuncAnimation(fig, update, interval=200, cache_frame_data=False)
+    plt.show()
+
+
 # ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    import sys
+    parser = argparse.ArgumentParser(description="LiDAR point-cloud visualizer")
+    parser.add_argument('iface', nargs='?', default='enp8s0',
+                        help='Network interface (default: enp8s0)')
+    parser.add_argument('--3d', dest='view_3d', action='store_true',
+                        help='Show an interactive 3D matplotlib plot instead of the 2D top-down view')
+    args = parser.parse_args()
 
-    iface = sys.argv[1] if len(sys.argv) > 1 else 'enp8s0'
-    ChannelFactoryInitialize(0, iface)
+    ChannelFactoryInitialize(0, args.iface)
 
     sub = ChannelSubscriber('rt/utlidar/cloud_base', PointCloud2_)
     sub.Init(handler=on_pointcloud, queueLen=10)
 
-    range_m = RANGE_M
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WINDOW_NAME, CANVAS_SIZE, CANVAS_SIZE)
+    if args.view_3d:
+        print(f"LiDAR 3D visualizer running (interface: {args.iface}). Close the window to quit.")
+        run_3d_viewer()
+    else:
+        range_m = RANGE_M
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_NAME, CANVAS_SIZE, CANVAS_SIZE)
 
-    print(f"LiDAR visualizer running (interface: {iface}). Press q to quit.")
+        print(f"LiDAR visualizer running (interface: {args.iface}). Press q to quit.")
 
-    while True:
-        with cloud_lock:
-            cloud_snapshot = {k: v.copy() for k, v in latest_cloud.items()} if latest_cloud else None
-            n = cloud_count
-        freq = cloud_freq
+        while True:
+            with cloud_lock:
+                cloud_snapshot = {k: v.copy() for k, v in latest_cloud.items()} if latest_cloud else None
+                n = cloud_count
+            freq = cloud_freq
 
-        frame = render(cloud_snapshot, n, freq, range_m)
-        cv2.imshow(WINDOW_NAME, frame)
+            frame = render(cloud_snapshot, n, freq, range_m)
+            cv2.imshow(WINDOW_NAME, frame)
 
-        key = cv2.waitKey(33) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('+') or key == ord('='):
-            range_m = max(RANGE_MIN, range_m - RANGE_STEP)
-        elif key == ord('-'):
-            range_m = min(RANGE_MAX, range_m + RANGE_STEP)
+            key = cv2.waitKey(33) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord('+') or key == ord('='):
+                range_m = max(RANGE_MIN, range_m - RANGE_STEP)
+            elif key == ord('-'):
+                range_m = min(RANGE_MAX, range_m + RANGE_STEP)
 
-    cv2.destroyAllWindows()
+        cv2.destroyAllWindows()

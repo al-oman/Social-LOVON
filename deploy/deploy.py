@@ -361,13 +361,14 @@ class MotionControlThread(threading.Thread):
                 pass
         img_q.put(frame)
 
+        # Always render sim view (before motion control, which could fail)
+        c.crowdnav_sim_frame = c.crowdnav_provider.render_frame()
+
         # Build L2MM input: merge current state with synthetic object fields
         state = {**c.state}
 
         with c.motion_lock:
             c._update_motion_control(state, lidar_cloud=synthetic["lidar"])
-
-        c.crowdnav_sim_frame = c.crowdnav_provider.render_frame()
 
     def stop(self):
         self.running = False
@@ -494,6 +495,7 @@ class VisualLanguageController:
         sn_kwargs = {"image_width": sn_width}
         if self.crowdnav_sim_mode:
             sn_kwargs["use_lidar_depth"] = True
+            sn_kwargs["time_step"] = self.crowdnav_provider.time_step
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
 
@@ -561,7 +563,7 @@ class VisualLanguageController:
 
         # Mission instruction input area
         initial_instructions = [
-            "move to the bag at speed of 1.0 m/s"
+            "move to the handbag at speed of 0.5 m/s"
             # "move to the person at speed of 0.7 m/s",
             # "Run to the human at speed of 0.5 m/s",
             # "run to the chair at speed of 0.4 m/s",

@@ -94,9 +94,9 @@ class SocialNavigator:
         # --- Action shield  params ---
         "shield_thresh": 0.5,       # safety score below this → shield activates
         "shield_active_states": ["running"],  # mission states where shield is armed
-        "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
-        "k_brake": 0.6,             # forward speed reduction gain
-        "v_min_scale": 0.1,         # minimum forward speed scale when braking
+        # "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
+        # "k_brake": 0.6,             # forward speed reduction gain
+        # "v_min_scale": 0.1,         # minimum forward speed scale when braking
         "horizon_s": 2.0,
         "horizon_steps": 10,
         "mono_k": 300.0,
@@ -122,6 +122,8 @@ class SocialNavigator:
         "bev_range_m": 5.0,            # visible range in BEV (meters), independent of d_max
         "bev_z_min": -0.0,            # BEV display Z filter min (sensor-relative)
         "bev_z_max": 2.0,             # BEV display Z filter max (sensor-relative)
+        # --- Ego-motion compensation ---
+        "time_step": 0.25,            # seconds per control cycle (for ego-motion compensation)
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -156,6 +158,7 @@ class SocialNavigator:
         self._motion_modulated = None
         self._lidar_ranges = None
         self._robot_predicted_path = None  # list of [x, y] in robot frame
+        self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
 
         # --- Diagnostics ---
         self.diag = {
@@ -225,6 +228,9 @@ class SocialNavigator:
         self._motion_original = list(motion_vector)
         self._motion_modulated = list(modified_vector)
 
+        # Store executed velocity for ego-motion compensation next frame
+        self._ego_velocity = list(modified_vector)
+
         # 8. Update diagnostics
         self._update_diagnostics()
 
@@ -286,6 +292,9 @@ class SocialNavigator:
         # Store both for BEV visualisation
         self._motion_original = list(motion_vector)
         self._motion_modulated = list(modified_vector)
+
+        # Store executed velocity for ego-motion compensation next frame
+        self._ego_velocity = list(modified_vector)
 
         # 8. Update diagnostics
         self._update_diagnostics()
@@ -413,7 +422,7 @@ class SocialNavigator:
             return None
 
         # Filter: only points in front of the robot (x > 0)
-        # mask = lx > 0
+        mask = lx > 0
 
         # Filter: human-height range (z relative to sensor)
         mask &= (lz >= self.params["lidar_z_min"]) & (lz <= self.params["lidar_z_max"])
@@ -671,6 +680,38 @@ class SocialNavigator:
     #  STAGE 4 -- Trajectory prediction                                 #
     # ================================================================== #
 
+    def _compensate_ego_motion(self):
+        """Transform predictor history from previous robot frame to current.
+
+        Between frames the robot executed self._ego_velocity for time_step
+        seconds.  A world-fixed point at [x_lat, depth] in the OLD robot
+        frame maps to the NEW robot frame as:
+
+            1. Translate:  x' = x_lat + v_lat*dt,  d' = depth - v_fwd*dt
+            2. Rotate by -omega*dt (robot turned left, world rotates right):
+               x'' =  x'*cos + d'*sin
+               d'' = -x'*sin + d'*cos
+        """
+        if self._ego_velocity is None:
+            return
+        v_fwd, v_lat, omega = self._ego_velocity
+        dt = self.params["time_step"]
+        dtheta = omega * dt
+        cos_dt = math.cos(dtheta)
+        sin_dt = math.sin(dtheta)
+
+        for traj in self._predictor.agent_trajectories.values():
+            for entry in traj:
+                x_lat, depth = entry['position']
+                # translate
+                x_lat += v_lat * dt
+                depth -= v_fwd * dt
+                # rotate
+                entry['position'] = [
+                    x_lat * cos_dt + depth * sin_dt,
+                   -x_lat * sin_dt + depth * cos_dt,
+                ]
+
     def _predict_trajectories(self):
         # type: () -> None
         """
@@ -688,6 +729,9 @@ class SocialNavigator:
         Track IDs are persistent across frames (provided by ByteTrack),
         enabling meaningful multi-frame history and velocity estimation.
         """
+        # Transform stored history from previous robot frame to current
+        self._compensate_ego_motion()
+
         # Feed current observations into predictor
         for human in self._tracked_humans.values():
             if human.position_rf is not None:
@@ -802,6 +846,14 @@ class SocialNavigator:
 
         threat = 1.0 - self.safety_score          # 0 = safe, 1 = dangerous
 
+        # Ensure safety grid is computed for potential field correction
+        bev_range = self.params["bev_range_m"]
+        self.grid, _ = self.get_safety_heatmap(
+            xlim=(-bev_range / 2, bev_range / 2),
+            ylim=(0, bev_range),
+            resolution=bev_range / 50,
+        )
+
         # ---- PLACEHOLDER LOGIC ----
         vy_correction = 0
         vx_correction = 0
@@ -809,7 +861,6 @@ class SocialNavigator:
         vy_corrected = vy + vy_correction
         vx_corrected = vx + vx_correction
         omega_corrected = omega + omega_correction
-        print(omega_correction)
         logger.info(
             "SHIELD  threat=%.2f  omega_corr=%.3f  omega %.3f->%.3f",
             threat, omega_correction, omega, omega_corrected,
