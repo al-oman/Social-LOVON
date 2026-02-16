@@ -92,13 +92,13 @@ class SocialNavigator:
         "d_safe": 0.8,
         "d_max": 2.5,
         # --- Action shield  params ---
-        "shield_thresh": 0.75,       # safety score below this → shield activates
+        "shield_thresh": 0.5,       # safety score below this → shield activates
         "shield_active_states": ["running"],  # mission states where shield is armed
         # "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
         # "k_brake": 0.6,             # forward speed reduction gain
         # "v_min_scale": 0.1,         # minimum forward speed scale when braking
-        "horizon_s": 2.0,
-        "horizon_steps": 10,
+        "horizon_s": 4.0,
+        "horizon_steps": 20,
         "mono_k": 300.0,
         # --- Camera params  ---
         "image_width": 640,
@@ -855,7 +855,6 @@ class SocialNavigator:
             resolution=bev_range / 50,
         )
 
-        # ---- PLACEHOLDER LOGIC ----
         vy_correction = 0
         vx_correction = 0
         omega_correction = self._potential_field_correction()
