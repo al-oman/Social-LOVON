@@ -2,6 +2,7 @@ import struct
 import time
 import threading
 import argparse
+from collections import deque
 import numpy as np
 import cv2
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelFactoryInitialize
@@ -43,14 +44,21 @@ cloud_freq = 0.0
 _freq_start = time.time()
 _freq_count = 0
 
+ACCUMULATE_N = 10  # number of recent scans to merge for persistence
+_cloud_buffer = deque(maxlen=ACCUMULATE_N)
+
 
 def on_pointcloud(msg: PointCloud2_):
     global latest_cloud, cloud_count, cloud_freq, _freq_start, _freq_count
     try:
         cloud = pointcloud2_to_array(msg)
         with cloud_lock:
-            latest_cloud = cloud
-            cloud_count = msg.width * msg.height
+            _cloud_buffer.append(cloud)
+            # merge all buffered scans into one cloud
+            keys = cloud.keys()
+            latest_cloud = {k: np.concatenate([c[k] for c in _cloud_buffer])
+                            for k in keys}
+            cloud_count = len(next(iter(latest_cloud.values())))
 
         _freq_count += 1
         now = time.time()
@@ -76,14 +84,14 @@ RANGE_MAX = 50.0
 POINT_RADIUS = 1
 
 # --- Tunable filtering parameters ---
-Z_MIN = -2.0         # meters — drop points below this (ground plane)
+Z_MIN = -0.05         # meters — drop points below this (ground plane)
 Z_MAX = 10.0             # meters — drop points above this (ceiling / noise)
 DIST_MAX = 10.0   
       # meters — drop points farther than this
-ORIGIN_THRESH = 1    # meters — drop points within this radius of (0,0,0)
+ORIGIN_THRESH = 0.3  # meters — drop points within this radius of (0,0,0)
 _first_frame_printed = False
 
-AXES_LIM = 3.0
+AXES_LIM = 2.0
 
 
 def world_to_px(x, y, range_m):
@@ -164,7 +172,8 @@ def render(cloud, n_points, freq, range_m):
                 (pts_px[:, 1] >= 0) & (pts_px[:, 1] < CANVAS_SIZE)
             )
             for px, py, col in zip(pts_px[on_canvas, 0], pts_px[on_canvas, 1], colors[on_canvas]):
-                canvas[py, px] = col
+                cv2.circle(canvas, (int(px), int(py)), 3,
+                           tuple(int(c) for c in col), -1)
             n_drawn = int(on_canvas.sum())
 
     # Robot marker (green triangle)
@@ -242,11 +251,11 @@ def run_3d_viewer():
             ax.scatter(xf, yf, zf, c=zf, cmap='jet', s=1, depthshade=True)
             ax.set_xlim(-AXES_LIM, AXES_LIM)
             ax.set_ylim(-AXES_LIM, AXES_LIM)
-            ax.set_zlim(Z_MIN, Z_MAX)
+            ax.set_zlim(0, AXES_LIM)
         else:
             ax.set_xlim(-AXES_LIM, AXES_LIM)
             ax.set_ylim(-AXES_LIM, AXES_LIM)
-            ax.set_zlim(Z_MIN, Z_MAX)
+            ax.set_zlim(0, AXES_LIM)
 
         fig.canvas.draw_idle()
 

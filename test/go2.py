@@ -74,7 +74,7 @@ def print_help():
 
 def main():
 
-    ChannelFactoryInitialize(0, "enp8s0")
+    ChannelFactoryInitialize(0, "enx00e06c79d1cb")
    
     # Initialize subscriber for monitoring
     print("Initializing state monitor...")

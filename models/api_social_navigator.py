@@ -113,15 +113,16 @@ class SocialNavigator:
         "track_iou_thresh": 0.3,    # minimum IoU to accept a match
         "track_max_lost": 30,       # frames before a lost track is removed
         # --- LiDAR depth estimation ---
-        "use_lidar_depth": False,      # True = use LiDAR for depth, False = monocular only
-        "lidar_z_min": 0.0,          # meters, min Z relative to sensor (below sensor)
+        "use_lidar_depth": True,       # True = use LiDAR for depth, False = monocular only
+        "lidar_z_min": 0.4,          # meters, min Z in base frame (rejects ground ~-0.5)
         "lidar_z_max": 2.0,           # meters, max Z relative to sensor (above sensor)
-        "lidar_angle_margin_deg": 2.0, # degrees, angular padding on bbox edges
+        "lidar_angle_margin_deg": -5.0, # degrees, angular padding on bbox edges
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
+        "lidar_ema_alpha": 0.05,        # EMA smoothing factor (0..1); lower = smoother, higher = more responsive
+        "lidar_depth_percentile": 10,  # percentile to find nearest returns (seed for cluster)
+        "lidar_cluster_margin": 0.5,   # meters — only keep points within this of the nearest seed; rejects wall
         # --- BEV minimap display ---
         "bev_range_m": 5.0,            # visible range in BEV (meters), independent of d_max
-        "bev_z_min": -0.0,            # BEV display Z filter min (sensor-relative)
-        "bev_z_max": 2.0,             # BEV display Z filter max (sensor-relative)
         # --- Ego-motion compensation ---
         "time_step": 0.25,            # seconds per control cycle (for ego-motion compensation)
     }
@@ -199,11 +200,11 @@ class SocialNavigator:
         Returns:
             motion_vector : [v_x, v_y, omega_z]  (unmodified for now)
         """
-        if not self.enabled:
-            return motion_vector
-
         self._frame_count += 1
         self._lidar_ranges = lidar_ranges
+
+        # --- Perception (always runs so BEV can show humans) ---
+
         # 1. Parse detections from pose_state
         detections = self._parse_pose_state(pose_state)
 
@@ -215,6 +216,14 @@ class SocialNavigator:
 
         # 4. Predict future trajectories
         self._predict_trajectories()
+
+        # --- Safety / correction (only when enabled) ---
+
+        if not self.enabled:
+            self._motion_original = list(motion_vector)
+            self._motion_modulated = list(motion_vector)
+            self._update_diagnostics()
+            return motion_vector
 
         # 5. Compute safety score
         self.safety_score = self._compute_safety_score()
@@ -423,23 +432,41 @@ class SocialNavigator:
             return None
 
         # Filter: only points in front of the robot (x > 0)
-        mask = lx > 0
-
-        # Filter: human-height range (z relative to sensor)
-        mask &= (lz >= self.params["lidar_z_min"]) & (lz <= self.params["lidar_z_max"])
+        mask_front = lx > 0
 
         # Compute camera-convention angle for each point
         # Robot frame: x=forward, y=left; camera: positive angle = right
         theta = np.arctan2(-ly, lx)
-        mask &= (theta >= theta_left) & (theta <= theta_right)
+        mask_cone = mask_front & (theta >= theta_left) & (theta <= theta_right)
+
+        # Log z-range of points inside the bbox cone (before z filter)
+        if not hasattr(self, '_lidar_z_diag_count'):
+            self._lidar_z_diag_count = 0
+        self._lidar_z_diag_count += 1
+        if self._lidar_z_diag_count <= 20 and np.any(mask_cone):
+            cone_z = lz[mask_cone]
+            logger.warning("[LiDAR z-diag] points in bbox cone: %d, "
+                           "z range: [%.3f, %.3f], "
+                           "z_min param: %.2f, z_max param: %.2f",
+                           len(cone_z), cone_z.min(), cone_z.max(),
+                           self.params["lidar_z_min"],
+                           self.params["lidar_z_max"])
+
+        # Filter: human-height range (z relative to base frame)
+        mask = mask_cone & (lz >= self.params["lidar_z_min"]) & (lz <= self.params["lidar_z_max"])
 
         if np.count_nonzero(mask) < self.params["lidar_min_points"]:
             return None
 
-        # Forward depth (lx = forward in lidar frame).
-        # Using forward depth (not range) so _pixel_to_robot_frame's
-        # pinhole inversion x_lat = depth * (u - cx) / fx is correct.
-        return float(np.median(lx[mask]))
+        # Nearest-cluster: find the closest returns, then keep only
+        # points within a tight margin of that distance.  This rejects
+        # the wall behind the person even when wall points dominate.
+        depths = lx[mask]
+        near_ref = float(np.percentile(depths, self.params["lidar_depth_percentile"]))
+        cluster_mask = depths <= near_ref + self.params["lidar_cluster_margin"]
+        if np.count_nonzero(cluster_mask) < self.params["lidar_min_points"]:
+            return near_ref
+        return float(np.median(depths[cluster_mask]))
 
     def _estimate_distance_mono(self, det):
         # type: (dict) -> Optional[float]
@@ -661,8 +688,7 @@ class SocialNavigator:
         union = area_a[:, None] + area_b[None, :] - inter
         return inter / np.maximum(union, 1e-6)
 
-    @staticmethod
-    def _apply_detection(track, det, timestamp):
+    def _apply_detection(self, track, det, timestamp):
         """Update a track dict with data from a new detection."""
         track["bbox"] = det.get("bbox")
         track["center_px"] = det.get("center_px")
@@ -671,8 +697,24 @@ class SocialNavigator:
         track["confidence"] = det.get("confidence", 0.0)
         track["distance_lidar"] = det.get("distance_lidar")
         track["distance_mono"] = det.get("distance_mono")
-        track["distance"] = det.get("distance")
-        track["position_rf"] = det.get("position_rf")
+
+        # EMA smoothing on lidar distance
+        raw_dist = det.get("distance")
+        prev_dist = track.get("distance")
+        if raw_dist is not None and prev_dist is not None:
+            alpha = self.params["lidar_ema_alpha"]
+            track["distance"] = alpha * raw_dist + (1 - alpha) * prev_dist
+        else:
+            track["distance"] = raw_dist
+
+        # Recompute position_rf from smoothed distance
+        if track["distance"] is not None and det.get("center_px") is not None:
+            u = det["center_px"][0]
+            x_lateral = track["distance"] * (u - self._cx) / self._fx
+            track["position_rf"] = [x_lateral, track["distance"]]
+        else:
+            track["position_rf"] = det.get("position_rf")
+
         track["last_seen"] = timestamp
         track["state"] = "active"
         track["frames_lost"] = 0
@@ -979,6 +1021,14 @@ class SocialNavigator:
         rcx = sz // 2
         rcy = sz - pad
 
+        # Camera FOV lines
+        half_fov = np.radians(self.params["fov_deg"] / 2.0)
+        fov_len = int(bev_range * scale)
+        for sign in (-1, 1):
+            ex = int(rcx + sign * fov_len * np.sin(half_fov))
+            ey = int(rcy - fov_len * np.cos(half_fov))
+            _cv2.line(bev, (rcx, rcy), (ex, ey), (100, 100, 100), 1, _cv2.LINE_AA)
+
         # Range-ring semicircles
         for r_m in np.arange(1.0, bev_range + 0.01, 1.0):
             r_px = int(r_m * scale)
@@ -1003,8 +1053,8 @@ class SocialNavigator:
                     mask &= dist_sq > 0.01 ** 2
                     mask &= lx > 0
                     mask &= (lx ** 2 + ly ** 2) <= bev_range ** 2
-                    mask &= ((lz >= self.params["bev_z_min"])
-                             & (lz <= self.params["bev_z_max"]))
+                    mask &= ((lz >= self.params["lidar_z_min"])
+                             & (lz <= self.params["lidar_z_max"]))
 
                     fx, fy, fz = lx[mask], ly[mask], lz[mask]
 
@@ -1024,7 +1074,9 @@ class SocialNavigator:
                         colors = _cv2.applyColorMap(
                             z_norm.reshape(-1, 1), _cv2.COLORMAP_JET
                         ).reshape(-1, 3)
-                        bev[py_arr, px_arr] = colors
+                        for _px, _py, _col in zip(px_arr, py_arr, colors):
+                            _cv2.circle(bev, (int(_px), int(_py)), 3,
+                                        tuple(int(c) for c in _col), -1)
                         _lidar_z_min, _lidar_z_max = z_min, z_max
 
         # LiDAR Z-height colorbar legend
@@ -1048,8 +1100,10 @@ class SocialNavigator:
         _cv2.drawMarker(bev, (rcx, rcy), (0, 255, 0),
                         _cv2.MARKER_TRIANGLE_UP, 24, 2)
 
-        _cv2.putText(bev, "Bird's Eye View", (10, 25),
-                     _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 1)
+        n_humans = len([h for h in self._tracked_humans.values()
+                        if h.position_rf is not None])
+        _cv2.putText(bev, f"Bird's Eye View  [{n_humans} human{'s' if n_humans != 1 else ''}]",
+                     (10, 25), _cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
         # Robot motion-vector curves
         path_tips = {}  # key: "original" or "corrected" -> (px, py)
@@ -1102,9 +1156,11 @@ class SocialNavigator:
             if not (0 <= px < sz and 0 <= py < sz):
                 continue
 
-            _cv2.circle(bev, (px, py), 8, (0, 0, 255), -1)
-            _cv2.putText(bev, str(human.track_id), (px + 10, py - 4),
-                         _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            _cv2.circle(bev, (px, py), 10, (0, 0, 255), -1)
+            _cv2.circle(bev, (px, py), 10, (255, 255, 255), 1)
+            dist_str = f"{human.distance:.1f}m" if human.distance is not None else "?"
+            _cv2.putText(bev, f"#{human.track_id} {dist_str}", (px + 13, py + 4),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             if human.predicted_path:
                 for pt in human.predicted_path:

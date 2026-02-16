@@ -59,56 +59,96 @@ def pointcloud2_to_array(msg: PointCloud2_):
 
 
 class LiDARGetterThread(threading.Thread):
-    """LiDAR Point Cloud Acquisition Thread"""
+    """LiDAR Point Cloud Acquisition Thread
+
+    Accumulates the last ``accumulate_n`` scans so that ``get_cloud()``
+    returns a denser merged point cloud instead of a single sparse frame.
+    """
+
+    ACCUMULATE_N = 10  # number of recent scans to merge
 
     def __init__(self, controller):
         super().__init__()
+        from collections import deque
         self.controller = controller
         self.running = True
         self.lidar_lock = threading.Lock()
         self.latest_cloud = None
+        self._cloud_buffer = deque(maxlen=self.ACCUMULATE_N)
         self.freq_start = time.time()
         self.freq_count = 0
+        # polling-rate diagnostics
+        self._last_cb_time = None
+        self._gap_max = 0.0
+        self._parse_total = 0.0
+        self._parse_count = 0
 
     def run(self):
-        self._sub = ChannelSubscriber('rt/utlidar/cloud_base', PointCloud2_)
+        self._sub = ChannelSubscriber('rt/utlidar/cloud', PointCloud2_)
         self._sub.Init(handler=self._on_pointcloud, queueLen=10)
         while self.running:
             time.sleep(0.5)
 
     def _on_pointcloud(self, msg: PointCloud2_):
         try:
+            # --- polling-rate diagnostics ---
+            now = time.time()
+            if self._last_cb_time is not None:
+                gap = now - self._last_cb_time
+                if gap > self._gap_max:
+                    self._gap_max = gap
+            self._last_cb_time = now
+
+            t0 = time.perf_counter()
             cloud = pointcloud2_to_array(msg)
-            #pretty sure this is right
-            # cloud['x'] = -cloud['x']
-            # cloud['y'] = -cloud['y']
+            parse_ms = (time.perf_counter() - t0) * 1000
+            self._parse_total += parse_ms
+            self._parse_count += 1
+
             with self.lidar_lock:
                 self.latest_cloud = cloud
+                self._cloud_buffer.append(cloud)
 
             self.freq_count += 1
-            now = time.time()
             if now - self.freq_start >= 1.0:
                 freq = self.freq_count / (now - self.freq_start)
                 # Diagnostic: log field names, point count, and value ranges
                 fields = list(cloud.keys())
                 n_pts = len(next(iter(cloud.values()))) if cloud else 0
-                diag = f"[LiDARGetter] {freq:.1f} Hz | {n_pts} pts | fields={fields}"
+                avg_parse = self._parse_total / max(self._parse_count, 1)
+                accum_pts = sum(len(next(iter(c.values()))) for c in self._cloud_buffer)
+                diag = (f"[LiDARGetter] {freq:.1f} Hz | {n_pts} pts/scan | "
+                        f"accum={accum_pts} pts ({len(self._cloud_buffer)} scans) | "
+                        f"parse={avg_parse:.1f}ms | gap_max={self._gap_max*1000:.0f}ms")
                 for k, v in cloud.items():
                     if len(v) > 0:
                         diag += f" | {k}:[{v.min():.2f}, {v.max():.2f}]"
                 print(diag)
+                if self._gap_max > 0.5:
+                    print(f"[LiDARGetter] WARNING: max inter-message gap {self._gap_max*1000:.0f}ms — "
+                          "messages may be dropping. Check network or queueLen.")
+                if avg_parse > 50:
+                    print(f"[LiDARGetter] WARNING: avg parse time {avg_parse:.0f}ms is high — "
+                          "consider optimising pointcloud2_to_array.")
                 with self.controller.freq_lock:
                     self.controller.lidar_getter_freq = freq
                 self.freq_start = now
                 self.freq_count = 0
+                self._gap_max = 0.0
+                self._parse_total = 0.0
+                self._parse_count = 0
         except Exception as e:
             print(f"LiDARGetter Error: {e}")
 
     def get_cloud(self):
+        """Return the accumulated (merged) point cloud from recent scans."""
         with self.lidar_lock:
-            if self.latest_cloud is None:
+            if not self._cloud_buffer:
                 return None
-            return {k: v.copy() for k, v in self.latest_cloud.items()}
+            keys = self._cloud_buffer[0].keys()
+            merged = {k: np.concatenate([c[k] for c in self._cloud_buffer])
+                      for k in keys}
+            return merged
 
     def stop(self):
         self.running = False
@@ -1073,7 +1113,7 @@ class VisualLanguageController:
                     self.crowdnav_label.image = sim_photo
 
                 # Render BEV in its own panel
-                if hasattr(self, 'social_nav') and self.social_nav.enabled:
+                if hasattr(self, 'social_nav'):
                     bev = self.social_nav.render_bev(show_heatmap=True)
                     bev = cv2.cvtColor(bev, cv2.COLOR_BGR2RGB)
                     bev_photo = ImageTk.PhotoImage(image=Image.fromarray(bev))
