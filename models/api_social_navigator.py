@@ -92,7 +92,7 @@ class SocialNavigator:
         "d_safe": 0.8,
         "d_max": 2.5,
         # --- Action shield  params ---
-        "shield_thresh": 0.5,       # safety score below this → shield activates
+        "shield_thresh": 0.75,       # safety score below this → shield activates
         "shield_active_states": ["running"],  # mission states where shield is armed
         # "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
         # "k_brake": 0.6,             # forward speed reduction gain
@@ -115,7 +115,7 @@ class SocialNavigator:
         # --- LiDAR depth estimation ---
         "use_lidar_depth": False,      # True = use LiDAR for depth, False = monocular only
         "lidar_z_min": 0.0,          # meters, min Z relative to sensor (below sensor)
-        "lidar_z_max": 1.0,           # meters, max Z relative to sensor (above sensor)
+        "lidar_z_max": 2.0,           # meters, max Z relative to sensor (above sensor)
         "lidar_angle_margin_deg": 2.0, # degrees, angular padding on bbox edges
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
         # --- BEV minimap display ---
@@ -159,6 +159,7 @@ class SocialNavigator:
         self._lidar_ranges = None
         self._robot_predicted_path = None  # list of [x, y] in robot frame
         self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
+        self._goal_rf = None               # [x_lateral, depth] estimated goal position
 
         # --- Diagnostics ---
         self.diag = {
@@ -894,6 +895,15 @@ class SocialNavigator:
     #  STAGE 8 -- Diagnostics                                             #
     # ================================================================== #
 
+    def update_goal(self, object_xyn, bbox_height_px):
+        """Estimate goal position in robot frame from camera detection."""
+        if bbox_height_px is None or bbox_height_px < 10:
+            self._goal_rf = None
+            return
+        depth = self.params["mono_k"] / bbox_height_px
+        u_px = object_xyn[0] * self.params["image_width"]
+        self._goal_rf = [depth * (u_px - self._cx) / self._fx, depth]
+
     def _update_diagnostics(self):
         distances = [
             h.distance for h in self._tracked_humans.values()
@@ -951,6 +961,18 @@ class SocialNavigator:
                 hm_bgr = _cv2.resize(hm_bgr, (inner, inner), interpolation=_cv2.INTER_NEAREST)
                 hm_bgr = _cv2.flip(hm_bgr, 0)
                 bev[pad:pad+inner, pad:pad+inner] = hm_bgr
+
+                # Shield-threshold contour
+                thresh = self.params["shield_thresh"]
+                binary = (self.grid < thresh).astype(np.uint8) * 255
+                binary = _cv2.resize(binary, (inner, inner),
+                                     interpolation=_cv2.INTER_NEAREST)
+                binary = _cv2.flip(binary, 0)
+                contours, _ = _cv2.findContours(
+                    binary, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    cnt += np.array([[[pad, pad]]])
+                _cv2.drawContours(bev, contours, -1, (0, 0, 0), 1)
 
         _cv2.rectangle(bev, (0, 0), (sz - 1, sz - 1), (255, 255, 255), 1)
 
@@ -1091,6 +1113,14 @@ class SocialNavigator:
                     ty = int(rcy - pt[1] * scale)
                     if 0 <= tx < sz and 0 <= ty < sz:
                         _cv2.circle(bev, (tx, ty), 4, (0, 165, 255), -1)
+
+        # Goal marker
+        if self._goal_rf is not None:
+            gpx = int(rcx + self._goal_rf[0] * scale)
+            gpy = int(rcy - self._goal_rf[1] * scale)
+            if 0 <= gpx < sz and 0 <= gpy < sz:
+                _cv2.drawMarker(bev, (gpx, gpy), (0, 255, 0),
+                                _cv2.MARKER_STAR, 16, 2)
 
         return bev
 

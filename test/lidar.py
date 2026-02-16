@@ -76,12 +76,14 @@ RANGE_MAX = 50.0
 POINT_RADIUS = 1
 
 # --- Tunable filtering parameters ---
-Z_MIN = -5.0         # meters — drop points below this (ground plane)
-Z_MAX = 2.0             # meters — drop points above this (ceiling / noise)
+Z_MIN = -2.0         # meters — drop points below this (ground plane)
+Z_MAX = 10.0             # meters — drop points above this (ceiling / noise)
 DIST_MAX = 10.0   
       # meters — drop points farther than this
 ORIGIN_THRESH = 1    # meters — drop points within this radius of (0,0,0)
 _first_frame_printed = False
+
+AXES_LIM = 3.0
 
 
 def world_to_px(x, y, range_m):
@@ -238,12 +240,12 @@ def run_3d_viewer():
 
         if len(xf) > 0:
             ax.scatter(xf, yf, zf, c=zf, cmap='jet', s=1, depthshade=True)
-            ax.set_xlim(xf.min(), xf.max())
-            ax.set_ylim(yf.min(), yf.max())
-            ax.set_zlim(zf.min(), zf.max())
+            ax.set_xlim(-AXES_LIM, AXES_LIM)
+            ax.set_ylim(-AXES_LIM, AXES_LIM)
+            ax.set_zlim(Z_MIN, Z_MAX)
         else:
-            ax.set_xlim(-RANGE_M, RANGE_M)
-            ax.set_ylim(-RANGE_M, RANGE_M)
+            ax.set_xlim(-AXES_LIM, AXES_LIM)
+            ax.set_ylim(-AXES_LIM, AXES_LIM)
             ax.set_zlim(Z_MIN, Z_MAX)
 
         fig.canvas.draw_idle()

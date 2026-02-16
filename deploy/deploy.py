@@ -745,6 +745,15 @@ class VisualLanguageController:
 
     def _yolo_image_post_process(self, results, original_image):
         """Process YOLO Detection Results"""
+        if not hasattr(self, '_wcheck'):
+            self._wcheck = True
+            w = original_image.shape[1]
+            if w != self.social_nav.params["image_width"]:
+                print(f"[SocialNav] auto-correcting image_width: {self.social_nav.params['image_width']} -> {w}")
+                self.social_nav.params["image_width"] = w
+                half_fov = np.radians(self.social_nav.params["fov_deg"] / 2.0)
+                self.social_nav._fx = (w / 2.0) / np.tan(half_fov)
+                self.social_nav._cx = w / 2.0
         detections = []
         for result in results:
             for box in result.boxes:
@@ -893,6 +902,10 @@ class VisualLanguageController:
             mission_state=self.state["mission_state_in"],
             lidar_ranges=lidar_cloud,
         )
+
+        bbox = self.state.get("bounding_box")
+        bbox_h = (bbox[3] - bbox[1]) if bbox else None
+        self.social_nav.update_goal(self.state["object_xyn"], bbox_h)
 
     def _control_robot(self):
         """Send Motion Commands to Robot"""
