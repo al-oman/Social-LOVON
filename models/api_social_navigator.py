@@ -97,8 +97,8 @@ class SocialNavigator:
         # "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
         # "k_brake": 0.6,             # forward speed reduction gain
         # "v_min_scale": 0.1,         # minimum forward speed scale when braking
-        "horizon_s": 4.0,
-        "horizon_steps": 20,
+        "horizon_s": 5.0,
+        "horizon_steps": 25,
         "mono_k": 300.0,
         # --- Camera params  ---
         "image_width": 640,
