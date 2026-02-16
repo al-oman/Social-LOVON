@@ -105,7 +105,7 @@ class SocialNavigator:
         "fov_deg": 120.0,
         # --- Trajectory prediction ---
         "pred_history": 5,
-        "pred_steps": 10,
+        "pred_steps": 20,
         "pred_interval": 1,    # predict every frame
         # --- ByteTrack tracker ---
         "track_high_thresh": 0.5,   # confidence >= this → first association
