@@ -537,6 +537,12 @@ class VisualLanguageController:
         if self.crowdnav_sim_mode:
             sn_kwargs["use_lidar_depth"] = True
             sn_kwargs["time_step"] = self.crowdnav_provider.time_step
+            sn_kwargs["image_height"] = self.crowdnav_provider.image_height
+            sn_kwargs["fov_deg"] = self.crowdnav_provider.fov_deg
+            sn_kwargs["fov_v_deg"] = self.crowdnav_provider.fov_deg
+            sn_kwargs["lidar_cam_z_offset"] = 0.0
+            sn_kwargs["lidar_cam_pitch_offset"] = 0.0
+            sn_kwargs["lidar_cam_yaw_offset"] = 0.0
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
         # self.lidar_window = LidarWindowSide()
@@ -1099,6 +1105,7 @@ class VisualLanguageController:
             if hasattr(self.image_getter_thread, 'image_queue'):
                 img = self.image_getter_thread.image_queue.get(timeout=1)
                 img = self._show_results(img)
+                img = self.social_nav.overlay_lidar(img)
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(img)
                 img = img.resize((800, 600), Image.LANCZOS)

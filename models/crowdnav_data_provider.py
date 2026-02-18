@@ -66,6 +66,7 @@ class CrowdNavDataProvider:
 
         self.ob = None
         self.done = False
+        self._robot_trajectory = []  # list of (px, py) for rendering
 
     # ------------------------------------------------------------------
     #  Episode control
@@ -74,6 +75,7 @@ class CrowdNavDataProvider:
     def reset(self, phase='test', test_case=None):
         self.ob = self.env.reset(phase, test_case)
         self.done = False
+        self._robot_trajectory = []
         return self.ob
 
     # ------------------------------------------------------------------
@@ -90,6 +92,7 @@ class CrowdNavDataProvider:
 
         self_state = self.robot.get_full_state()
         human_states = self.ob
+        self._robot_trajectory.append((self_state.px, self_state.py))
 
         humans_rf = self._humans_to_robot_frame(self_state, human_states)
 
@@ -300,6 +303,11 @@ class CrowdNavDataProvider:
             hc = plt.Circle(human.get_position(), human.radius,
                             fill=False, color=cmap(i))
             ax.add_artist(hc)
+
+        # Robot trajectory
+        if len(self._robot_trajectory) > 1:
+            traj = np.array(self._robot_trajectory)
+            ax.plot(traj[:, 0], traj[:, 1], 'b-', linewidth=1.5, alpha=0.7)
 
         # Robot
         s = self.robot.get_full_state()

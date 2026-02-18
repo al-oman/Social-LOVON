@@ -94,18 +94,17 @@ class SocialNavigator:
         # --- Action shield  params ---
         "shield_thresh": 0.5,       # safety score below this → shield activates
         "shield_active_states": ["running"],  # mission states where shield is armed
-        # "k_repulse": 0.4,           # repulsive velocity gain (m/s per unit cost)
-        # "k_brake": 0.6,             # forward speed reduction gain
-        # "v_min_scale": 0.1,         # minimum forward speed scale when braking
         "horizon_s": 5.0,
         "horizon_steps": 25,
         "mono_k": 300.0,
         # --- Camera params  ---
         "image_width": 640,
-        "fov_deg": 120.0,
+        "image_height": 480,
+        "fov_deg": 80.0,
+        "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
         # --- Trajectory prediction ---
-        "pred_history": 5,
-        "pred_steps": 20,
+        "pred_history": 25,
+        "pred_steps": 60,
         "pred_interval": 1,    # predict every frame
         # --- ByteTrack tracker ---
         "track_high_thresh": 0.5,   # confidence >= this → first association
@@ -114,17 +113,24 @@ class SocialNavigator:
         "track_max_lost": 30,       # frames before a lost track is removed
         # --- LiDAR depth estimation ---
         "use_lidar_depth": True,       # True = use LiDAR for depth, False = monocular only
-        "lidar_z_min": 0.0,          # meters, min Z in base frame (rejects ground ~-0.5)
+        "lidar_z_min": -0.3,          # meters, min Z in base frame (rejects ground ~-0.5)
         "lidar_z_max": 5.0,           # meters, max Z relative to sensor (above sensor)
         "lidar_angle_margin_deg": -5.0, # degrees, angular padding on bbox edges
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
-        "lidar_ema_alpha": 0.05,        # EMA smoothing factor (0..1); lower = smoother, higher = more responsive
-        "lidar_depth_percentile": 10,  # percentile to find nearest returns (seed for cluster)
+        "lidar_ema_alpha": 0.5,        # EMA smoothing factor (0..1); lower = smoother, higher = more responsive
+        "lidar_depth_percentile": 50,  # percentile to find nearest returns (seed for cluster)
         "lidar_cluster_margin": 0.5,   # meters — only keep points within this of the nearest seed; rejects wall
+        "lidar_kpt_conf_thresh": 0.5,  # min keypoint confidence to use for skeleton matching
+        "lidar_skeleton_dist": 0.05,   # max normalized image distance from skeleton to count as "on person"
         # --- BEV minimap display ---
-        "bev_range_m": 5.0,            # visible range in BEV (meters), independent of d_max
+        "bev_range_m": 7.0,            # visible range in BEV (meters), independent of d_max
         # --- Ego-motion compensation ---
         "time_step": 0.25,            # seconds per control cycle (for ego-motion compensation)
+        # --- LiDAR-camera overlay calibration ---
+        "lidar_cam_yaw_offset": -0.0,   # degrees, horizontal rotation offset
+        "lidar_cam_pitch_offset": 1.0, # degrees, vertical rotation offset
+        "lidar_cam_z_offset": 0.05,    # meters, camera height above lidar (positive = camera higher)
+        "lidar_cam_fov_scale": 1.0,    # multiplier on fov_deg for fine-tuning projection
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -132,9 +138,12 @@ class SocialNavigator:
         self.params = {**self.DEFAULT_PARAMS, **kwargs}
 
         # --- Camera parameters ---
-        half_fov = math.radians(self.params["fov_deg"] / 2.0)
-        self._fx = (self.params["image_width"] / 2.0) / math.tan(half_fov)
+        half_fov_h = math.radians(self.params["fov_deg"] / 2.0)
+        half_fov_v = math.radians(self.params["fov_v_deg"] / 2.0)
+        self._fx = (self.params["image_width"] / 2.0) / math.tan(half_fov_h)
         self._cx = self.params["image_width"] / 2.0
+        self._fy = (self.params["image_height"] / 2.0) / math.tan(half_fov_v)
+        self._cy = self.params["image_height"] / 2.0
 
         # --- Tracked human data for ByteTrack ---
         self._tracked_humans = {}  # type: Dict[int, TrackedHuman]
@@ -153,6 +162,10 @@ class SocialNavigator:
         self.shield_active = False
         self.safety_score = 1.0      # 1.0 = fully safe, 0.0 = imminent collision
         self.grid = None
+
+        # --- Shared lidar-to-image projection (built once per frame) ---
+        self._lidar_image_points = None  # (N,5) array: [u_norm, v_norm, lx, ly, lz]
+        self._lidar_human_masks = []     # list of boolean masks into _lidar_image_points
 
         # --- Motion vectors (for BEV drawing) ---
         self._motion_original = None
@@ -202,6 +215,8 @@ class SocialNavigator:
         """
         self._frame_count += 1
         self._lidar_ranges = lidar_ranges
+        self._lidar_image_points = self._project_lidar_to_image(lidar_ranges)
+        self._lidar_human_masks = []
 
         # --- Perception (always runs so BEV can show humans) ---
 
@@ -368,6 +383,82 @@ class SocialNavigator:
         return detections
 
     # ================================================================== #
+    #  LiDAR-to-image projection (shared by distance est. + overlay)     #
+    # ================================================================== #
+
+    def _project_lidar_to_image(self, lidar_ranges):
+        """Project all front-facing LiDAR points to normalised image coords.
+
+        Returns an (N, 5) array: [u_norm, v_norm, lx, ly, lz]
+        where u_norm/v_norm are in [0, 1] (calibrated projection) and
+        lx/ly/lz are the original pointcloud coordinates.
+        Returns None if no valid points.
+        """
+        if lidar_ranges is None:
+            return None
+
+        lx = lidar_ranges.get("x")
+        ly = lidar_ranges.get("y")
+        lz = lidar_ranges.get("z")
+        if lx is None or ly is None or lz is None:
+            return None
+
+        lx = np.asarray(lx, dtype=np.float64)
+        ly = np.asarray(ly, dtype=np.float64)
+        lz = np.asarray(lz, dtype=np.float64)
+        if lx.size == 0:
+            return None
+
+        # --- Filter: finite, non-origin, front-only, z-range ---
+        mask = (np.isfinite(lx) & np.isfinite(ly) & np.isfinite(lz))
+        mask &= (lx ** 2 + ly ** 2 + lz ** 2) > 0.01 ** 2
+        mask &= lx > 0
+        mask &= (lz >= self.params["lidar_z_min"]) & (lz <= self.params["lidar_z_max"])
+
+        lx, ly, lz = lx[mask], ly[mask], lz[mask]
+        if lx.size == 0:
+            return None
+
+        # --- Apply translation + rotation calibration offsets ---
+        lz = lz - self.params["lidar_cam_z_offset"]  # shift to camera height
+
+        yaw = math.radians(self.params["lidar_cam_yaw_offset"])
+        pitch = math.radians(self.params["lidar_cam_pitch_offset"])
+
+        cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+        rx = lx * cos_y - ly * sin_y
+        ry = lx * sin_y + ly * cos_y
+
+        cos_p, sin_p = math.cos(pitch), math.sin(pitch)
+        rx2 = rx * cos_p + lz * sin_p
+        rz = -rx * sin_p + lz * cos_p
+
+        # Keep only points in front after rotation
+        front = rx2 > 0
+        rx2, ry, rz = rx2[front], ry[front], rz[front]
+        lx, ly, lz = lx[front], ly[front], lz[front]
+        if rx2.size == 0:
+            return None
+
+        # --- Pinhole projection to normalised coords ---
+        fov_h = math.radians(self.params["fov_deg"] * self.params["lidar_cam_fov_scale"])
+        fov_v = math.radians(self.params["fov_v_deg"] * self.params["lidar_cam_fov_scale"])
+        half_tan_h = math.tan(fov_h / 2.0)
+        half_tan_v = math.tan(fov_v / 2.0)
+
+        u_norm = 0.5 + (-ry / rx2) / (2.0 * half_tan_h)
+        v_norm = 0.5 + (-rz / rx2) / (2.0 * half_tan_v)
+
+        # Keep only in-frame points
+        in_frame = (u_norm >= 0) & (u_norm <= 1) & (v_norm >= 0) & (v_norm <= 1)
+        u_norm, v_norm = u_norm[in_frame], v_norm[in_frame]
+        lx, ly, lz = lx[in_frame], ly[in_frame], lz[in_frame]
+        if lx.size == 0:
+            return None
+
+        return np.column_stack([u_norm, v_norm, lx, ly, lz])
+
+    # ================================================================== #
     #  STAGE 2 -- Distance estimation + robot-frame projection            #
     # ================================================================== #
 
@@ -392,80 +483,104 @@ class SocialNavigator:
             # --- Compute robot-frame 2D position ---
             det["position_rf"] = self._pixel_to_robot_frame(det)
 
+    # COCO skeleton connections
+    _SKELETON = [
+        [0, 1], [0, 2], [1, 3], [2, 4],              # Head
+        [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],     # Arms
+        [5, 11], [6, 12], [11, 12],                   # Torso
+        [11, 13], [13, 15], [12, 14], [14, 16],       # Legs
+    ]
+
+    @staticmethod
+    def _point_to_segment_dist(px, py, ax, ay, bx, by):
+        """Vectorised min distance from points (px,py) to segment (a→b)."""
+        abx, aby = bx - ax, by - ay
+        ab_sq = abx * abx + aby * aby
+        if ab_sq < 1e-12:
+            return np.hypot(px - ax, py - ay)
+        t = np.clip(((px - ax) * abx + (py - ay) * aby) / ab_sq, 0.0, 1.0)
+        return np.hypot(px - (ax + t * abx), py - (ay + t * aby))
+
     def _estimate_distance_lidar(self, det, lidar_ranges):
         # type: (dict, ...) -> Optional[float]
-        """Estimate distance to a detected person using LiDAR point cloud.
+        """Estimate distance using the shared lidar-to-image projection table.
 
-        Projects the person's bounding box into angular space, finds LiDAR
-        points within that cone, and returns the median horizontal distance.
+        Selects lidar points whose normalised image position is close to the
+        person's skeleton lines (preferred) or inside the bounding box
+        (fallback).  Saves a boolean mask into ``self._lidar_human_masks``
+        so the overlay can colour those points black.
         """
         if not self.params["use_lidar_depth"]:
             return None
-        if lidar_ranges is None:
+        if self._lidar_image_points is None or len(self._lidar_image_points) == 0:
             return None
 
         bbox = det.get("bbox")
         if bbox is None:
             return None
 
-        x1_px, _, x2_px, _ = bbox
+        pts = self._lidar_image_points  # (N, 5): u_n, v_n, lx, ly, lz
+        u_n = pts[:, 0]
+        v_n = pts[:, 1]
+        lx  = pts[:, 2]
 
-        # Convert bbox left/right pixel edges to horizontal angles (radians)
-        theta_left = math.atan((x1_px - self._cx) / self._fx)
-        theta_right = math.atan((x2_px - self._cx) / self._fx)
-        margin = math.radians(self.params["lidar_angle_margin_deg"])
-        theta_left -= margin
-        theta_right += margin
+        img_w = float(self.params["image_width"])
+        img_h = float(self.params["image_height"])
 
-        # Extract LiDAR point arrays
-        lx = lidar_ranges.get("x")
-        ly = lidar_ranges.get("y")
-        lz = lidar_ranges.get("z")
-        if lx is None or ly is None or lz is None:
+        # --- Try skeleton-based selection ---
+        kpts = det.get("keypoints")
+        kpts_conf = det.get("keypoints_conf")
+        selected = None
+        used_skeleton = False
+
+        if kpts is not None and kpts_conf is not None:
+            kpts = np.asarray(kpts, dtype=np.float64)
+            kpts_conf = np.asarray(kpts_conf, dtype=np.float64)
+            min_conf = self.params["lidar_kpt_conf_thresh"]
+
+            # Normalise keypoints to [0, 1]
+            kpts_n = kpts / np.array([img_w, img_h])
+
+            segments = [(kpts_n[i], kpts_n[j]) for i, j in self._SKELETON
+                        if kpts_conf[i] >= min_conf and kpts_conf[j] >= min_conf]
+
+            if len(segments) >= 3:
+                min_dists = np.full(len(u_n), np.inf)
+                for seg_a, seg_b in segments:
+                    d = self._point_to_segment_dist(
+                        u_n, v_n, seg_a[0], seg_a[1], seg_b[0], seg_b[1])
+                    np.minimum(min_dists, d, out=min_dists)
+
+                thresh = self.params["lidar_skeleton_dist"]
+                selected = min_dists <= thresh
+                if np.count_nonzero(selected) >= self.params["lidar_min_points"]:
+                    used_skeleton = True
+
+        # --- Fallback: normalised bbox ---
+        if not used_skeleton:
+            x1_px, y1_px, x2_px, y2_px = bbox
+            u_min, u_max = x1_px / img_w, x2_px / img_w
+            v_min, v_max = y1_px / img_h, y2_px / img_h
+            selected = ((u_n >= u_min) & (u_n <= u_max)
+                        & (v_n >= v_min) & (v_n <= v_max))
+
+        if np.count_nonzero(selected) < self.params["lidar_min_points"]:
             return None
 
-        lx = np.asarray(lx, dtype=np.float64)
-        ly = np.asarray(ly, dtype=np.float64)
-        lz = np.asarray(lz, dtype=np.float64)
-
-        if lx.size == 0:
-            return None
-
-        # Filter: only points in front of the robot (x > 0)
-        mask_front = lx > 0
-
-        # Compute camera-convention angle for each point
-        # Robot frame: x=forward, y=left; camera: positive angle = right
-        theta = np.arctan2(-ly, lx)
-        mask_cone = mask_front & (theta >= theta_left) & (theta <= theta_right)
-
-        # Log z-range of points inside the bbox cone (before z filter)
-        if not hasattr(self, '_lidar_z_diag_count'):
-            self._lidar_z_diag_count = 0
-        self._lidar_z_diag_count += 1
-        if self._lidar_z_diag_count <= 20 and np.any(mask_cone):
-            cone_z = lz[mask_cone]
-            logger.warning("[LiDAR z-diag] points in bbox cone: %d, "
-                           "z range: [%.3f, %.3f], "
-                           "z_min param: %.2f, z_max param: %.2f",
-                           len(cone_z), cone_z.min(), cone_z.max(),
-                           self.params["lidar_z_min"],
-                           self.params["lidar_z_max"])
-
-        # Filter: human-height range (z relative to base frame)
-        mask = mask_cone & (lz >= self.params["lidar_z_min"]) & (lz <= self.params["lidar_z_max"])
-
-        if np.count_nonzero(mask) < self.params["lidar_min_points"]:
-            return None
-
-        # Nearest-cluster: find the closest returns, then keep only
-        # points within a tight margin of that distance.  This rejects
-        # the wall behind the person even when wall points dominate.
-        depths = lx[mask]
+        # --- Nearest-cluster ---
+        depths = lx[selected]
         near_ref = float(np.percentile(depths, self.params["lidar_depth_percentile"]))
-        cluster_mask = depths <= near_ref + self.params["lidar_cluster_margin"]
+        cluster_margin = self.params["lidar_cluster_margin"]
+        cluster_mask = depths <= near_ref + cluster_margin
         if np.count_nonzero(cluster_mask) < self.params["lidar_min_points"]:
             return near_ref
+
+        # Build full mask (into _lidar_image_points) for overlay
+        full_mask = np.zeros(len(pts), dtype=bool)
+        sel_indices = np.where(selected)[0]
+        full_mask[sel_indices[cluster_mask]] = True
+        self._lidar_human_masks.append(full_mask)
+
         return float(np.median(depths[cluster_mask]))
 
     def _estimate_distance_mono(self, det):
@@ -1075,7 +1190,7 @@ class SocialNavigator:
                             z_norm.reshape(-1, 1), _cv2.COLORMAP_JET
                         ).reshape(-1, 3)
                         for _px, _py, _col in zip(px_arr, py_arr, colors):
-                            _cv2.circle(bev, (int(_px), int(_py)), 3,
+                            _cv2.circle(bev, (int(_px), int(_py)), 1,
                                         tuple(int(c) for c in _col), -1)
                         _lidar_z_min, _lidar_z_max = z_min, z_max
 
@@ -1194,6 +1309,54 @@ class SocialNavigator:
     #     roi = image[y0:y0+sz, x0:x0+sz]
     #     _cv2.addWeighted(bev, 0.7, roi, 0.3, 0, roi)
     #     return image
+
+    # ================================================================== #
+    #  LiDAR-camera overlay                                              #
+    # ================================================================== #
+
+    def overlay_lidar(self, image):
+        """Draw LiDAR points on a BGR camera image using the shared projection.
+
+        Reads ``self._lidar_image_points`` (built in step()) and colours
+        points by forward distance.  Points used for human distance
+        estimation (``self._lidar_human_masks``) are drawn black.
+        """
+        import cv2 as _cv2
+
+        if self._lidar_image_points is None or len(self._lidar_image_points) == 0:
+            return image
+
+        pts = self._lidar_image_points  # (N, 5): u_n, v_n, lx, ly, lz
+        h_img, w_img = image.shape[:2]
+
+        u = (pts[:, 0] * w_img).astype(np.int32)
+        v = (pts[:, 1] * h_img).astype(np.int32)
+        lx = pts[:, 2]  # forward distance
+
+        # --- Distance colourmap (close=red, far=blue) ---
+        d_min, d_max = lx.min(), lx.max()
+        d_span = d_max - d_min if (d_max - d_min) > 1e-3 else 1.0
+        z_norm = ((lx - d_min) / d_span * 255).astype(np.uint8)
+        colors = _cv2.applyColorMap(z_norm.reshape(-1, 1), _cv2.COLORMAP_JET).reshape(-1, 3)
+
+        # --- Build human-point mask ---
+        is_human = np.zeros(len(u), dtype=bool)
+        for mask in self._lidar_human_masks:
+            is_human |= mask
+
+        # Draw non-human points as coloured circles
+        for _u, _v, _col, _h in zip(u, v, colors, is_human):
+            if not _h:
+                _cv2.circle(image, (int(_u), int(_v)), 5,
+                            tuple(int(c) for c in _col), -1)
+
+        # Draw human points as small white stars
+        for _u, _v, _h in zip(u, v, is_human):
+            if _h:
+                _cv2.drawMarker(image, (int(_u), int(_v)), (255, 255, 255),
+                                _cv2.MARKER_STAR, 8, 1)
+
+        return image
 
     # ================================================================== #
     #  Safety heatmap (shared by deploy + simulation)                     #
