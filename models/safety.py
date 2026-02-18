@@ -14,7 +14,7 @@ import numpy as np
 # ------------------------------------------------------------------
 SIGMA = 1.5    # Gaussian width (meters)
 H = 1.0        # peak danger at distance=0
-GAMMA = 0.99   # trajectory discount factor
+GAMMA = 0.995   # trajectory discount factor
 
 
 # ------------------------------------------------------------------

@@ -85,18 +85,13 @@ class SocialNavigator:
     #  Tunable parameters (placeholder defaults from architecture spec)
     # ------------------------------------------------------------------ #
     DEFAULT_PARAMS = {
-        "sigma": 0.8,
-        "h": 1.0,
-        "lambda_v": 0.5,
-        "beta_traj": 0.3,
-        "d_safe": 0.8,
-        "d_max": 2.5,
         # --- Action shield  params ---
-        "shield_thresh": 0.5,       # safety score below this → shield activates
+        "shield_thresh": 0.7,       # safety score below this → shield activates
         "shield_active_states": ["running"],  # mission states where shield is armed
         "horizon_s": 5.0,
         "horizon_steps": 25,
         "mono_k": 300.0,
+        "correction_gain": 25.0,
         # --- Camera params  ---
         "image_width": 640,
         "image_height": 480,
@@ -1012,11 +1007,11 @@ class SocialNavigator:
             resolution=bev_range / 50,
         )
 
-        vy_correction = 0
-        vx_correction = 0
-        omega_correction = self._potential_field_correction()
-        vy_corrected = vy + vy_correction
-        vx_corrected = vx + vx_correction
+        # Scale correction proportionally to threat level so it ramps
+        # up smoothly rather than snapping to full strength at the threshold.
+        omega_correction = self._potential_field_correction() * threat
+        vx_corrected = vx
+        vy_corrected = vy
         omega_corrected = omega + omega_correction
         logger.info(
             "SHIELD  threat=%.2f  omega_corr=%.3f  omega %.3f->%.3f",
@@ -1042,8 +1037,7 @@ class SocialNavigator:
         # Convert to angular correction
         # If danger on right (grad_x < 0), turn left (omega > 0)
         # If danger on left (grad_x > 0), turn right (omega < 0)
-        omega_gain = 10.0  # TODO: tune this parameter
-        omega_correction = -omega_gain * safety_grad_x
+        omega_correction = -self.DEFAULT_PARAMS["correction_gain"] * safety_grad_x
         
         return omega_correction
 
