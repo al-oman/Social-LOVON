@@ -87,7 +87,8 @@ class SocialNavigator:
     # ------------------------------------------------------------------ #
     DEFAULT_PARAMS = {
         # --- Action shield  params ---
-        "shield_thresh": 0.7,       # safety score below this → shield activates
+        "shield_thresh_on": 0.7,    # safety score below this → shield activates
+        "shield_thresh_off": 0.8,   # safety score above this → shield deactivates (hysteresis)
         "shield_active_states": ["running"],  # mission states where shield is armed
         "horizon_s": 5.0,
         "horizon_steps": 25,
@@ -1036,8 +1037,11 @@ class SocialNavigator:
         allowed = self.params["shield_active_states"]
         if mission_state not in allowed:
             return False
-        shield_state = self.safety_score < self.params["shield_thresh"]
-        return shield_state
+        # Hysteresis: lower threshold to activate, higher to deactivate
+        if self.shield_active:
+            return self.safety_score < self.params["shield_thresh_off"]
+        else:
+            return self.safety_score < self.params["shield_thresh_on"]
 
     # ================================================================== #
     #  STAGE 7 -- Command correction (action shield)                       #
@@ -1177,7 +1181,7 @@ class SocialNavigator:
                 bev[pad:pad+inner, pad:pad+inner] = hm_bgr
 
                 # Shield-threshold contour
-                thresh = self.params["shield_thresh"]
+                thresh = self.params["shield_thresh_on"]
                 binary = (self.grid < thresh).astype(np.uint8) * 255
                 binary = _cv2.resize(binary, (inner, inner),
                                      interpolation=_cv2.INTER_NEAREST)
