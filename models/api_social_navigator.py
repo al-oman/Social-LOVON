@@ -52,6 +52,7 @@ class TrackedHuman:
         self.predicted_path = None       # list of [x_lateral, depth] future positions
         self.orientation = None          # radians, body heading
         self.last_seen = time.time()
+        self.is_ghost = False            # True = predicted from trajectory, not directly observed
 
     def __repr__(self):
         d = "{:.2f}m".format(self.distance) if self.distance is not None else "?"
@@ -126,6 +127,8 @@ class SocialNavigator:
         "lidar_cam_pitch_offset": 1.0, # degrees, vertical rotation offset
         "lidar_cam_z_offset": 0.05,    # meters, camera height above lidar (positive = camera higher)
         "lidar_cam_fov_scale": 1.0,    # multiplier on fov_deg for fine-tuning projection
+        # --- Ghost humans (out-of-FOV persistence) ---
+        "ghost_max_frames": 120,       # max frames a ghost persists (~30s at 4 Hz)
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -917,9 +920,70 @@ class SocialNavigator:
                 human.predicted_path = None
                 human.velocity = None
 
-        # Remove history for agents that disappeared
+        # --- Ghost humans: persist out-of-FOV agents via trajectory prediction ---
         active_ids = set(self._tracked_humans.keys())
-        self._predictor.prune_stale(active_ids)
+        ghost_max = self.params["ghost_max_frames"]
+
+        for agent_id in list(self._predictor.agent_trajectories.keys()):
+            if agent_id in active_ids:
+                continue  # still directly observed, not a ghost
+
+            traj = self._predictor.agent_trajectories[agent_id]
+            if not traj:
+                continue
+
+            last_timestep = traj[-1]['timestep']
+            frames_since_seen = self._frame_count - last_timestep
+
+            # Expired ghost — prune entirely
+            if frames_since_seen > ghost_max:
+                del self._predictor.agent_trajectories[agent_id]
+                self._predictor.predicted_trajectories.pop(agent_id, None)
+                continue
+
+            # Get predicted trajectory for this agent
+            pred = predictions.get(agent_id)
+            if not pred or len(pred) == 0:
+                continue
+
+            # Index into prediction to get ghost's "current" position
+            # predictions[0] = 1 step after last observation, so index = frames_since_seen - 1
+            pred_idx = frames_since_seen - 1
+            if pred_idx >= len(pred):
+                # Beyond prediction horizon — prune
+                del self._predictor.agent_trajectories[agent_id]
+                self._predictor.predicted_trajectories.pop(agent_id, None)
+                continue
+
+            ghost_pos = pred[pred_idx]  # [x_lateral, depth]
+
+            # Skip if predicted behind robot (depth <= 0)
+            if ghost_pos[1] <= 0:
+                del self._predictor.agent_trajectories[agent_id]
+                self._predictor.predicted_trajectories.pop(agent_id, None)
+                continue
+
+            # Create ghost TrackedHuman
+            ghost = TrackedHuman(agent_id)
+            ghost.is_ghost = True
+            ghost.position_rf = ghost_pos
+            ghost.distance = ghost_pos[1]  # depth as distance estimate
+            ghost.predicted_path = pred[pred_idx:]  # remaining predicted path
+            # Estimate velocity from predictor history
+            if len(traj) >= 2:
+                p0 = traj[-2]['position']
+                p1 = traj[-1]['position']
+                dt = traj[-1]['timestep'] - traj[-2]['timestep']
+                if dt > 0:
+                    ghost.velocity = [
+                        (p1[0] - p0[0]) / dt,
+                        (p1[1] - p0[1]) / dt,
+                    ]
+            self._tracked_humans[agent_id] = ghost
+
+        # Prune predictor entries not in updated tracked humans set
+        updated_ids = set(self._tracked_humans.keys())
+        self._predictor.prune_stale(updated_ids)
 
         # Reset predictor entirely if no humans tracked
         if not self._tracked_humans:
@@ -1209,9 +1273,14 @@ class SocialNavigator:
         _cv2.drawMarker(bev, (rcx, rcy), (0, 255, 0),
                         _cv2.MARKER_TRIANGLE_UP, 24, 2)
 
-        n_humans = len([h for h in self._tracked_humans.values()
-                        if h.position_rf is not None])
-        _cv2.putText(bev, f"Bird's Eye View  [{n_humans} human{'s' if n_humans != 1 else ''}]",
+        humans_with_pos = [h for h in self._tracked_humans.values()
+                           if h.position_rf is not None]
+        n_observed = len([h for h in humans_with_pos if not h.is_ghost])
+        n_ghosts = len([h for h in humans_with_pos if h.is_ghost])
+        count_str = f"{n_observed}"
+        if n_ghosts > 0:
+            count_str += f"+{n_ghosts}g"
+        _cv2.putText(bev, f"Bird's Eye View  [{count_str} human{'s' if (n_observed + n_ghosts) != 1 else ''}]",
                      (10, 25), _cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
         # Robot motion-vector curves
@@ -1265,11 +1334,19 @@ class SocialNavigator:
             if not (0 <= px < sz and 0 <= py < sz):
                 continue
 
-            _cv2.circle(bev, (px, py), 10, (0, 0, 255), -1)
-            _cv2.circle(bev, (px, py), 10, (255, 255, 255), 1)
-            dist_str = f"{human.distance:.1f}m" if human.distance is not None else "?"
-            _cv2.putText(bev, f"#{human.track_id} {dist_str}", (px + 13, py + 4),
-                         _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            if human.is_ghost:
+                # Hollow circle, lighter color for ghost humans
+                _cv2.circle(bev, (px, py), 10, (100, 100, 255), 2)
+                dist_str = f"{human.distance:.1f}m" if human.distance is not None else "?"
+                _cv2.putText(bev, f"#{human.track_id} {dist_str} (ghost)",
+                             (px + 13, py + 4),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 255), 1)
+            else:
+                _cv2.circle(bev, (px, py), 10, (0, 0, 255), -1)
+                _cv2.circle(bev, (px, py), 10, (255, 255, 255), 1)
+                dist_str = f"{human.distance:.1f}m" if human.distance is not None else "?"
+                _cv2.putText(bev, f"#{human.track_id} {dist_str}", (px + 13, py + 4),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
             if human.predicted_path:
                 for pt in human.predicted_path:
