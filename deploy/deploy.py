@@ -27,6 +27,7 @@ from unitree_sdk2py.b2.back_video.back_video_client import BackVideoClient as B2
 from models.api_object_extraction import SequenceToSequenceClassAPI
 from models.api_language2mostion import MotionPredictor
 from models.api_social_navigator import SocialNavigator
+from tools.lidar import LidarWindowSide
 
 from tkinter import Tk, Entry, Button, Label, Frame
 from PIL import Image, ImageTk
@@ -84,7 +85,7 @@ class LiDARGetterThread(threading.Thread):
         self._parse_count = 0
 
     def run(self):
-        self._sub = ChannelSubscriber('rt/utlidar/cloud', PointCloud2_)
+        self._sub = ChannelSubscriber('rt/utlidar/cloud_base', PointCloud2_)
         self._sub.Init(handler=self._on_pointcloud, queueLen=10)
         while self.running:
             time.sleep(0.5)
@@ -538,6 +539,7 @@ class VisualLanguageController:
             sn_kwargs["time_step"] = self.crowdnav_provider.time_step
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
+        # self.lidar_window = LidarWindowSide()
 
         # Initialize UI
         self.root = Tk()
@@ -1119,6 +1121,12 @@ class VisualLanguageController:
                     bev_photo = ImageTk.PhotoImage(image=Image.fromarray(bev))
                     self.bev_label.config(image=bev_photo)
                     self.bev_label.image = bev_photo
+
+                # Render separate LiDAR top-down window
+                if hasattr(self, 'lidar_window') and hasattr(self, 'social_nav'):
+                    cloud = self.social_nav._lidar_ranges
+                    if cloud is not None:
+                        self.lidar_window.update(cloud)
         except queue.Empty:
             pass
         except Exception as e:
@@ -1203,7 +1211,7 @@ if __name__ == "__main__":
                   help='Enable social navigation adjustments')
     parser.add_argument('--image_width', type=int, default=640,
                       help='Width of input images')
-    parser.add_argument('--network_device', type=str, default="enp8s0",
+    parser.add_argument('--network_device', type=str, default="enx00e06c79d1cb",
                       help='Netowrk Card')
     parser.add_argument('--crowdnav_sim_mode', action='store_true', default=False,
                 help='take input data from CrowdNav simulator')

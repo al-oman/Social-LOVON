@@ -114,8 +114,8 @@ class SocialNavigator:
         "track_max_lost": 30,       # frames before a lost track is removed
         # --- LiDAR depth estimation ---
         "use_lidar_depth": True,       # True = use LiDAR for depth, False = monocular only
-        "lidar_z_min": 0.4,          # meters, min Z in base frame (rejects ground ~-0.5)
-        "lidar_z_max": 2.0,           # meters, max Z relative to sensor (above sensor)
+        "lidar_z_min": 0.0,          # meters, min Z in base frame (rejects ground ~-0.5)
+        "lidar_z_max": 5.0,           # meters, max Z relative to sensor (above sensor)
         "lidar_angle_margin_deg": -5.0, # degrees, angular padding on bbox edges
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
         "lidar_ema_alpha": 0.05,        # EMA smoothing factor (0..1); lower = smoother, higher = more responsive

@@ -9,11 +9,16 @@ from unitree_sdk2py.go2.robot_state.robot_state_client import RobotStateClient
 
 
 # Robot state storage
+MOTOR_NAMES = ["FR_hip", "FR_thigh", "FR_calf",
+               "FL_hip", "FL_thigh", "FL_calf",
+               "RR_hip", "RR_thigh", "RR_calf",
+               "RL_hip", "RL_thigh", "RL_calf"]
+
 class RobotState:
     def __init__(self):
         self.battery_voltage = 0.0
         self.battery_current = 0.0
-        self.temperature = 0.0
+        self.motor_temps = [0] * 12
         self.motor_positions = [0.0] * 12
         self.last_update = time.time()
        
@@ -31,9 +36,9 @@ def lowstate_handler(msg: LowState_):
         robot_state.motor_positions[i] = msg.motor_state[i].q
 
    
-    # IMU temperature (if available)
-    if hasattr(msg, 'imu_state'):
-        robot_state.temperature = msg.imu_state.temperature
+    for i in range(12):
+        robot_state.motor_temps[i] = msg.motor_state[i].temperature
+
    
     robot_state.last_update = time.time()
 
@@ -45,8 +50,10 @@ def print_status():
     """Print current robot status"""
     print("\n" + "="*60)
     print(f"Battery: {robot_state.battery_voltage:.2f}V @ {robot_state.battery_current:.2f}A")
-    print(f"Temperature: {robot_state.temperature:.1f}°C")
-      
+    print("-"*60)
+    print("Motor Temperatures:")
+    for name, temp in zip(MOTOR_NAMES, robot_state.motor_temps):
+        print(f"  {name:>10}: {temp}°C")
     # Show if data is stale
     age = time.time() - robot_state.last_update
     if age > 1.0:

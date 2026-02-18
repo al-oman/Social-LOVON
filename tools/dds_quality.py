@@ -142,7 +142,7 @@ def print_report(col: MessageCollector, iface: str, topic: str, duration: float)
 def main():
     parser = argparse.ArgumentParser(
         description="DDS connection quality benchmark for Unitree LiDAR")
-    parser.add_argument('iface', help='Network interface (e.g. enp8s0, wlan0)')
+    parser.add_argument('iface', help='Network interface (e.g. enp8s0, wlan0)', default="enx00e06c79d1cb")
     parser.add_argument('--topic', default='rt/utlidar/cloud_base',
                         help='DDS topic to subscribe to (default: rt/utlidar/cloud_base)')
     parser.add_argument('--duration', type=float, default=10.0,
