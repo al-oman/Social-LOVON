@@ -16,6 +16,17 @@ conda create -n lovon_env python=3.8 -y
 # Activate the environment
 conda activate lovon_env
 
+# 2. Install Python-RVO2 Library
+# Follow the installation instructions in the [Python-RVO2](https://github.com/sybrenstuvel/Python-RVO2) library.
+# Certain adjustments must be made for compatibility with Python 3.8
+
+# 3. Install CrowdNav
+git clone https://github.com/vita-epfl/CrowdNav.git
+pip install -e .
+# Certain adjustments must be made for compatibility with Python 3.8
+# [TODO]: ADD VERISON ADJUSTMENTS
+
+
 # 2. Install PyTorch (Choose based on your GPU configuration)
 # For CPU-only
 pip install torch>=1.10.0

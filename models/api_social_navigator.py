@@ -325,35 +325,6 @@ class SocialNavigator:
 
         return modified_vector
 
-    def _extrapolate_robot_path(self, motion_vector):
-        """
-        Extrapolate the robot's future path from its current motion vector.
-
-        Uses the same unicycle integration as draw_bev lines 885-906.
-        Returns a list of [x, y] positions in robot frame (robot starts at origin).
-
-        Args:
-            motion_vector: [v_forward, v_lateral, omega_z]
-
-        Returns:
-            list of [x, y] points in robot frame
-        """
-        horizon = self.params["horizon_s"]
-        steps = self.params["horizon_steps"]
-        if steps <= 0:
-            return []
-        dt = horizon / steps
-
-        v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
-        x, y, theta = 0.0, 0.0, 0.0
-        path = []
-        for _ in range(steps):
-            x += (-v_forward * math.sin(theta) - v_lateral * math.cos(theta)) * dt
-            y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
-            theta += omega * dt
-            path.append([x, y])
-        return path
-
     # ================================================================== #
     #  STAGE 1 -- Parse pose_state into detection dicts                   #
     # ================================================================== #
@@ -1369,26 +1340,7 @@ class SocialNavigator:
 
         return bev
 
-    # def draw_bev(self, image, show_heatmap=False):
-    #     """Draw bird's-eye-view as overlay on bottom-right of image (legacy)."""
-    #     import cv2 as _cv2
-    #     sz = 600
-    #     margin = 10
-    #     h, w = image.shape[:2]
-    #     if w < sz + margin or h < sz + margin:
-    #         return image
-    #     x0 = w - sz - margin
-    #     y0 = h - sz - margin
-    #     bev = self.render_bev(show_heatmap=show_heatmap)
-    #     # blend onto camera image
-    #     roi = image[y0:y0+sz, x0:x0+sz]
-    #     _cv2.addWeighted(bev, 0.7, roi, 0.3, 0, roi)
-    #     return image
-
-    # ================================================================== #
     #  LiDAR-camera overlay                                              #
-    # ================================================================== #
-
     def overlay_lidar(self, image):
         """Draw LiDAR points on a BGR camera image using the shared projection.
 
@@ -1433,10 +1385,7 @@ class SocialNavigator:
 
         return image
 
-    # ================================================================== #
-    #  Safety heatmap (shared by deploy + simulation)                     #
-    # ================================================================== #
-
+    #  Safety heatmap (shared by deploy + simulation) 
     def get_safety_heatmap(self, xlim=(-5, 5), ylim=(-5, 5), resolution=0.2):
         """
         Compute a 2D safety heatmap from the currently tracked humans.
@@ -1481,3 +1430,33 @@ class SocialNavigator:
             human_predicted_paths=human_predicted_paths or None,
         )
         return self.grid, extent
+
+    # Extrapolate robot path
+    def _extrapolate_robot_path(self, motion_vector):
+        """
+        Extrapolate the robot's future path from its current motion vector.
+
+        Uses the same unicycle integration as draw_bev lines 885-906.
+        Returns a list of [x, y] positions in robot frame (robot starts at origin).
+
+        Args:
+            motion_vector: [v_forward, v_lateral, omega_z]
+
+        Returns:
+            list of [x, y] points in robot frame
+        """
+        horizon = self.params["horizon_s"]
+        steps = self.params["horizon_steps"]
+        if steps <= 0:
+            return []
+        dt = horizon / steps
+
+        v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
+        x, y, theta = 0.0, 0.0, 0.0
+        path = []
+        for _ in range(steps):
+            x += (-v_forward * math.sin(theta) - v_lateral * math.cos(theta)) * dt
+            y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
+            theta += omega * dt
+            path.append([x, y])
+        return path
