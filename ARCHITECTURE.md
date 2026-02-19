@@ -2,9 +2,59 @@
 
 ## Overview
 
-Social-LOVON is a socially-aware robot navigation system. A language-to-motion transformer (L2MM) generates velocity commands from natural-language instructions, and a social navigation layer modulates those commands to avoid humans.
+Social-LOVON is a socially-aware robot navigation system built around two models: a **language-to-motion transformer** (L2MM) that converts natural-language instructions into velocity commands, and a **social navigator** that modulates those commands to avoid humans.
 
-Two execution paths share the same core: **simulation** (`crowd_test.py` + CrowdNav gym) and **real robot** (`deploy.py` + Unitree Go2).
+Everything runs through `deploy.py`. The `--crowdnav_sim_mode` flag swaps the real sensor stack for a CrowdNav gym simulation that generates synthetic YOLO/LiDAR data, exercising the full perception pipeline without hardware.
+
+---
+
+## Pipeline Comparison
+
+```
+                    REAL ROBOT                          CROWDNAV SIM MODE
+                    (default)                           (--crowdnav_sim_mode)
+              ──────────────────                    ──────────────────────────
+
+              Go2 camera / RealSense                CrowdNavDataProvider
+              LiDARGetterThread (UDP)                  .step(motion_vector)
+              YoloProcessingThread                     ├─ env.step() (ORCA humans)
+              YoloPoseProcessingThread                 ├─ _generate_synthetic_pose_state()
+                     │                                 ├─ _generate_synthetic_lidar()
+                     │                                 └─ _generate_synthetic_object_state()
+                     ▼                                          │
+              result_queue.get(state)                           │
+                     │                                          │
+                     ├─ state has real YOLO                     ├─ state has synthetic YOLO
+                     │  detections + pose                       │  detections + pose
+                     │                                          │
+                     └──────────────┬───────────────────────────┘
+                                    │
+                                    ▼
+                       _update_motion_control(state, lidar_cloud)
+                                    │
+                       ┌────────────┴─────────────┐
+                       │                          │
+                       ▼                          ▼
+                 MotionPredictor            SocialNavigator
+                   .predict()                  .step()
+                       │                     (full 8-stage
+                       │                      pipeline)
+                       │                          │
+                       └────────────┬─────────────┘
+                                    │
+                                    ▼
+                           motion_vector [vx, vy, wz]
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │ REAL: sport_client     │
+                        │       .Move(vx,vy,wz)  │
+                        │ SIM:  stored for next   │
+                        │       env.step()        │
+                        └───────────────────────┘
+```
+
+Key difference: in `--crowdnav_sim_mode`, the 4 sensor/detection threads are replaced by a single `_crowdnav_tick()` call inside MotionControlThread that steps the CrowdNav gym env and builds synthetic `pose_state`, `lidar`, and `object_state` dicts. The downstream pipeline (`SocialNavigator.step()` with all 8 stages) is identical in both modes.
 
 ---
 
@@ -12,39 +62,35 @@ Two execution paths share the same core: **simulation** (`crowd_test.py` + Crowd
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│ ENTRY POINTS                                                                    │
+│  VisualLanguageController                                                       │
+│  (deploy/deploy.py)                                                             │
 │                                                                                 │
-│   tools/crowd_test.py (Simulation)             deploy/deploy.py (Real Robot)    │
-│   └─ CrowdNav gym env + LOVONCrowdPolicy       └─ Unitree SDK + YOLO + VLC     │
-└──────────────┬──────────────────────────────────────────────┬───────────────────┘
-               │                                              │
-               ▼                                              ▼
-┌──────────────────────────────────┐   ┌──────────────────────────────────────────┐
-│  LOVONCrowdPolicy                │   │  VisualLanguageController (deploy.py)    │
-│  (models/lovon_crowd_policy.py)  │   │                                          │
-│  extends crowd_sim Policy        │   │  Threads:                                │
-│                                  │   │   ImageGetterThread     (camera capture)  │
-│  predict(state)                  │   │   YoloProcessingThread  (object det.)    │
-│    1. _build_l2mm_input()        │   │   YoloPoseProcessingThread (pose est.)   │
-│    2. _call_l2mm()               │   │   MotionControlThread   (control loop)   │
-│    3. _call_social_nav()         │   │   LiDARGetterThread     (UDP lidar)      │
-│    4. _to_action()               │   │                                          │
-│                                  │   │  _update_motion_control(state)            │
-│  load_lovon(model, tok, social)  │   │    1. motion_predictor.predict()          │
-│  set_mission(instr0, instr1, obj)│   │    2. social_nav.step()                  │
-│  _sim_humans_to_robot_frame()    │   │    3. _control_robot() → Move(vx,vy,wz)  │
-│  _angle_to_xyn_whn()            │   │                                          │
-│  world_to_robot_frame()          │   │                                          │
-│  world_to_robot_frame_velocity() │   │                                          │
-└───────────┬──────────────────────┘   └──────────┬───────────────────────────────┘
-            │                                      │
-            │  uses                                │  uses
-            ▼                                      ▼
+│  __init__(model_dir, ..., crowdnav_sim_mode)                                    │
+│    ├─ MotionPredictor (L2MM)                                                    │
+│    ├─ SocialNavigator                                                           │
+│    ├─ YOLO models (object + pose)           — skipped in sim mode               │
+│    ├─ Unitree SDK (sport_client)            — skipped in sim mode               │
+│    └─ CrowdNavDataProvider                  — only in sim mode                  │
+│                                                                                 │
+│  Threads:                                                                       │
+│    ImageGetterThread                        — camera capture → image_queue       │
+│    YoloProcessingThread                     — object detection (skipped sim)     │
+│    YoloPoseProcessingThread                 — pose estimation (skipped sim)      │
+│    MotionControlThread                      — control loop (both modes)          │
+│    LiDARGetterThread                        — UDP lidar (skipped sim)            │
+│                                                                                 │
+│  _update_motion_control(state, lidar)       — L2MM predict → SocialNav step     │
+│  _control_robot()                           — sport_client.Move(vx, vy, wz)     │
+│  _show_results(image)                       — draw YOLO boxes, skeleton, BEV     │
+│  run()                                      — Tkinter main loop + GUI updates    │
+└──────────────┬──────────────────────────────────────────────────────────────────┘
+               │ uses
+               ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │  MotionPredictor                                                                │
 │  (models/api_language2mostion.py)                                               │
 │                                                                                 │
-│  __init__(model_path, tokenizer_path)   — loads L2MM transformer + tokenizer    │
+│  __init__(model_path, tokenizer_path)       — loads L2MM transformer+tokenizer  │
 │  predict(data) → {motion_vector, predicted_state, search_state}                 │
 │  _preprocess_input(data) → input_ids, attention_mask                            │
 │                                                                                 │
@@ -55,85 +101,69 @@ Two execution paths share the same core: **simulation** (`crowd_test.py` + Crowd
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │  SequenceToSequenceClassAPI                                                     │
-│  (models/api_object_extraction.py)         — used by deploy.py only             │
+│  (models/api_object_extraction.py)                                              │
 │                                                                                 │
-│  __init__(model_path, tokenizer_path)   — loads extraction transformer          │
-│  predict(instruction) → "handbag"       — extracts target class from text       │
+│  __init__(model_path, tokenizer_path)       — loads extraction transformer      │
+│  predict(instruction) → "handbag"           — extracts target class from text   │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │  SocialNavigator                                                                │
 │  (models/api_social_navigator.py)                                               │
 │                                                                                 │
-│  __init__(enabled, **params)            — camera intrinsics, predictor, tracker  │
+│  __init__(enabled, **params)                — camera intrinsics, predictor, etc  │
 │                                                                                 │
-│  step(motion_vec, pose_state,           — FULL pipeline (robot path)            │
-│       mission_state, lidar_ranges)        stages 1-8, returns modulated vec     │
-│  step_ground_truth(motion_vec,          — SIM pipeline (skips stages 1-3)       │
-│       gt_humans, mission_state)           populates humans directly from sim    │
+│  step(motion_vec, pose_state,               — full 8-stage pipeline             │
+│       mission_state, lidar_ranges)            returns modulated velocity         │
 │                                                                                 │
 │  ── Stage 1: Detection ──                                                       │
-│  _parse_pose_state(pose_state)          — YOLO keypoints+bboxes → det dicts     │
+│  _parse_pose_state(pose_state)              — YOLO keypoints+bboxes → det dicts │
 │                                                                                 │
 │  ── Stage 2: Distance Estimation ──                                             │
-│  _project_lidar_to_image(lidar)         — 3D lidar → 2D image coordinates       │
-│  _estimate_distances(dets, lidar)       — fuse lidar+mono, compute position_rf  │
-│  _estimate_distance_lidar(det, lidar)   — angular bbox query, cluster, median   │
-│  _estimate_distance_mono(det)           — d = mono_k / bbox_height              │
-│  _pixel_to_robot_frame(det)             — pinhole: (u,v)+depth → [x_lat, depth] │
+│  _project_lidar_to_image(lidar)             — 3D lidar → 2D image coords       │
+│  _estimate_distances(dets, lidar)           — fuse lidar+mono, → position_rf    │
+│  _estimate_distance_lidar(det, lidar)       — angular bbox query, cluster, med. │
+│  _estimate_distance_mono(det)               — d = mono_k / bbox_height          │
+│  _pixel_to_robot_frame(det)                 — pinhole: (u,v)+depth → [xlat, d]  │
 │                                                                                 │
 │  ── Stage 3: Tracking (ByteTrack) ──                                            │
-│  _update_tracker(detections)            — 3-pass IoU association, lifecycle mgmt │
-│  _associate(dets, tracks, iou_thresh)   — Hungarian matching on IoU matrix       │
-│  _compute_iou_matrix(boxes_a, boxes_b)  — pairwise IoU between two bbox sets    │
-│  _apply_detection(track, det, ts)       — copy det fields into track state       │
+│  _update_tracker(detections)                — 3-pass IoU assoc, lifecycle mgmt   │
+│  _associate(dets, tracks, iou_thresh)       — Hungarian matching on IoU matrix   │
+│  _compute_iou_matrix(boxes_a, boxes_b)      — pairwise IoU between bbox sets    │
+│  _apply_detection(track, det, ts)           — copy det fields into track state   │
 │                                                                                 │
 │  ── Stage 4: Trajectory Prediction ──                                           │
-│  _compensate_ego_motion()               — rotate predictor history by robot turn │
-│  _predict_trajectories()                — feed positions, predict, create ghosts │
-│    └─ ghost logic: persist out-of-FOV agents via extrapolated trajectory         │
+│  _compensate_ego_motion()                   — rotate predictor history by turn   │
+│  _predict_trajectories()                    — feed positions, predict, + ghosts  │
+│    └─ ghost logic: out-of-FOV agents persist via extrapolated trajectory         │
 │                                                                                 │
 │  ── Stage 5: Safety Score ──                                                    │
-│  _compute_safety_score()                — calls safety.robot_safety_score()      │
+│  _compute_safety_score()                    — calls safety.robot_safety_score()  │
 │                                                                                 │
 │  ── Stage 6: Shield Gate ──                                                     │
-│  _evaluate_shield(mission_state)        — hysteresis: on < thresh_on,            │
-│                                           off > thresh_off                       │
+│  _evaluate_shield(mission_state)            — hysteresis: on < thresh_on,        │
+│                                               off > thresh_off                   │
 │                                                                                 │
 │  ── Stage 7: Command Correction ──                                              │
-│  _correct_command(motion_vector)        — potential-field omega correction        │
-│  _potential_field_correction()           — grid gradient → angular steering       │
+│  _correct_command(motion_vector)            — potential-field omega correction    │
+│  _potential_field_correction()              — grid gradient → angular steering   │
 │                                                                                 │
 │  ── Stage 8: Diagnostics ──                                                     │
-│  _update_diagnostics()                  — log min_dist, num_humans, shield state │
+│  _update_diagnostics()                      — log min_dist, humans, shield state │
 │                                                                                 │
 │  ── Visualization ──                                                            │
-│  render_bev(show_heatmap)               — BEV minimap: lidar, humans, ghosts,   │
-│                                           trajectories, FOV, motion vectors      │
-│  overlay_lidar(image)                   — draw lidar points on camera image      │
-│  get_safety_heatmap(xlim, ylim, res)    — compute 2D safety grid for display    │
-│  update_goal(object_xyn, bbox_h)        — set goal marker in robot frame        │
-│  _extrapolate_robot_path(motion_vec)    — project robot path from velocity       │
+│  render_bev(show_heatmap)                   — BEV minimap: lidar, humans, ghosts │
+│                                               trajectories, FOV, motion vectors  │
+│  overlay_lidar(image)                       — draw lidar points on camera image  │
+│  get_safety_heatmap(xlim, ylim, res)        — 2D safety grid for display        │
+│  update_goal(object_xyn, bbox_h)            — set goal marker in robot frame    │
+│  _extrapolate_robot_path(motion_vec)        — project robot path from velocity   │
 └──────────────┬──────────────────────────────────────────────────────────────────┘
                │ uses
                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│  HumanTrajectoryPredictor                                                       │
-│  (models/humantrajectorypredictor.py)                                           │
-│                                                                                 │
-│  __init__(history_length, pred_steps, pred_interval)                            │
-│  update_agent_position(agent_id, [x,y], timestep) — append to sliding window    │
-│  predict_trajectory(agent_id) → [[x,y], ...]      — polyfit(1) extrapolation    │
-│  predict_all(timestep) → {id: [[x,y],...]}         — predict all, throttled     │
-│  prune_stale(active_ids)                           — remove gone agents          │
-│  reset()                                           — clear all state             │
-│                                                                                 │
-│  State: agent_trajectories = {id: deque([{position, timestep}, ...])}           │
-└─────────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────────┐
 │  TrackedHuman                                                                   │
-│  (models/api_social_navigator.py)       — data class, one per tracked person    │
+│  (models/api_social_navigator.py)           — data class, one per tracked person│
 │                                                                                 │
 │  Fields: track_id, position_image, bbox, keypoints, keypoints_conf, confidence  │
 │          distance_lidar, distance_mono, distance, position_rf                   │
@@ -141,52 +171,55 @@ Two execution paths share the same core: **simulation** (`crowd_test.py` + Crowd
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
+│  HumanTrajectoryPredictor                                                       │
+│  (models/humantrajectorypredictor.py)                                           │
+│                                                                                 │
+│  __init__(history_length, pred_steps, pred_interval)                            │
+│  update_agent_position(id, [x,y], timestep) — append to sliding window          │
+│  predict_trajectory(id) → [[x,y], ...]      — polyfit(1) linear extrapolation   │
+│  predict_all(timestep) → {id: [[x,y],...]}   — predict all agents, throttled    │
+│  prune_stale(active_ids)                     — remove gone agents               │
+│  reset()                                     — clear all state                  │
+│                                                                                 │
+│  State: agent_trajectories = {id: deque([{position, timestep}, ...])}           │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
 │  safety.py (module-level functions)                                             │
-│  (models/safety.py)                     — Gaussian + trajectory safety field    │
+│  (models/safety.py)                         — Gaussian + trajectory safety field│
 │                                                                                 │
 │  robot_safety_score(rx, ry, positions, paths) → float [0,1]                    │
 │  safety_score_at_point(x, y, positions, paths) → float [0,1]                   │
 │  compute_safety_grid(positions, xlim, ylim, res) → (grid, extent)              │
-│  _gaussian_grid(X, Y, positions)        — proximity: exp(-d^2 / 2sigma^2)      │
-│  _trajectory_grid(X, Y, paths)          — predicted path threat, gamma-decayed  │
-│  _safety_scores(X, Y, positions, paths) — min(gaussian, trajectory), clipped    │
+│  _gaussian_grid(X, Y, positions)            — proximity: exp(-d^2/2sigma^2)    │
+│  _trajectory_grid(X, Y, paths)              — predicted path threat, gamma-dec  │
+│  _safety_scores(X, Y, positions, paths)     — min(gaussian, trajectory)         │
 │                                                                                 │
 │  Constants: SIGMA=1.5m, H=1.0, GAMMA=0.995                                     │
 └─────────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │  CrowdNavDataProvider                                                           │
-│  (models/crowdnav_data_provider.py)     — bridges CrowdNav sim → deploy.py      │
-│                                           perception format (--crowdnav_sim_mode)│
+│  (models/crowdnav_data_provider.py)         — only used with --crowdnav_sim_mode│
+│                                               replaces camera + lidar + YOLO    │
 │                                                                                 │
-│  __init__(env_config, policy_config, ...) — creates CrowdSim env + ORCA humans  │
-│  reset(phase, test_case) → obs           — resets env, returns initial obs       │
-│  step(motion_vector) → (obs, reward, done, info)                                │
-│  _generate_synthetic_pose_state(humans)  — sim positions → fake YOLO detections  │
-│  _generate_synthetic_lidar(humans)       — sim positions → fake lidar cloud      │
-│  _generate_synthetic_object_state(self_state) — goal → fake object detection     │
-│  render_frame()                          — matplotlib top-down sim visualization │
+│  __init__(env_config, policy_config, ...)   — creates CrowdSim env, ORCA humans│
+│  reset(phase, test_case) → obs               — resets gym env                   │
+│  step(motion_vector) → {pose_state, lidar, object_state, obs, reward, ...}     │
+│  _generate_synthetic_pose_state(humans_rf)   — sim positions → fake YOLO dets   │
+│  _generate_synthetic_lidar(humans_rf)        — sim positions → fake lidar cloud │
+│  _generate_synthetic_object_state(self_st)   — goal → fake object detection     │
+│  render_frame()                              — matplotlib top-down sim view     │
+│                                                                                 │
+│  Wraps: CrowdSim(gym.Env) with ORCA-controlled humans                          │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Sim vs Robot
-
-|  | Simulation (`crowd_test.py`) | Robot (`deploy.py`) |
-|--|------------------------------|---------------------|
-| Human detection | Ground-truth from CrowdSim | YOLO pose estimation |
-| Distance | World-coord transform | LiDAR + monocular fusion |
-| Tracking | IDs given by sim | ByteTrack IoU association |
-| SocialNav entry | `step_ground_truth()` (stages 1-3 skipped) | `step()` (full pipeline) |
-| Threading | Single-threaded | 5 threads |
-| Actuation | `env.step(ActionXY/Rot)` | `sport_client.Move(vx, vy, wz)` |
-
-There is also a hybrid mode (`deploy.py --crowdnav_sim_mode`) that uses CrowdNavDataProvider to generate synthetic YOLO/lidar from the sim, exercising the full perception pipeline without a real robot.
-
 ## Ghost Humans
 
-When a tracked human exits the camera FOV, their predictor history is retained and used to create "ghost" TrackedHumans (`is_ghost=True`) that follow the extrapolated trajectory. Ghosts maintain safety-grid influence and render as hollow circles on the BEV minimap. They expire after `ghost_max_frames` (default 120 / ~30s at 4 Hz) or when predicted behind the robot.
+When a tracked human exits the camera FOV, their predictor history is retained and used to create "ghost" TrackedHumans (`is_ghost=True`) that follow the extrapolated trajectory. Ghosts maintain safety-grid influence and render as hollow circles on the BEV minimap. They expire after `ghost_max_frames` (default 120 frames / ~30s at 4 Hz) or when predicted behind the robot.
 
 ## Shield Hysteresis
 
@@ -194,25 +227,23 @@ The action shield uses two thresholds to prevent flickering:
 - **Activate** when `safety_score < shield_thresh_on` (default 0.7)
 - **Deactivate** when `safety_score > shield_thresh_off` (default 0.8)
 
+---
+
 ## File Map
 
 ```
 Social-LOVON/
 ├── deploy/
-│   └── deploy.py                          # Real robot entry point
-├── tools/
-│   ├── crowd_test.py                      # Simulation entry point
-│   └── crowd_test_live.py                 # Live visualization variant
+│   └── deploy.py                          # Entry point (real robot + sim mode)
 ├── models/
 │   ├── api_social_navigator.py            # SocialNavigator + TrackedHuman
 │   ├── api_language2mostion.py            # L2MM MotionPredictor
-│   ├── api_object_extraction.py           # Object extraction from text
+│   ├── api_object_extraction.py           # Object class extraction from text
 │   ├── humantrajectorypredictor.py        # Linear trajectory extrapolation
-│   ├── safety.py                          # Gaussian + trajectory safety
-│   ├── lovon_crowd_policy.py              # CrowdNav policy wrapper
-│   └── crowdnav_data_provider.py          # Synthetic perception from sim
+│   ├── safety.py                          # Gaussian + trajectory safety field
+│   └── crowdnav_data_provider.py          # Synthetic perception from CrowdNav sim
 ├── configs/
-│   ├── env_lovon.config                   # CrowdSim env parameters
+│   ├── env_lovon.config                   # CrowdSim environment parameters
 │   └── policy_lovon.config                # Policy + kinematics config
 ├── crowd_sim/envs/                        # CrowdNav gym environment
 │   ├── crowd_sim.py                       #   CrowdSim(gym.Env)
