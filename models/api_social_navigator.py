@@ -1280,25 +1280,25 @@ class SocialNavigator:
             path_tips[key] = tip
 
         # Full Robot trajectory curves
-        traj_tips = {}  # key: "original" or "corrected" -> (px, py)
-        for vec, color, key in [
-            (self._motion_original,  (255, 255, 0),  "original")
-            # (self._motion_modulated, (0, 255, 255),  "corrected"),
-        ]:
-            if vec is None:
-                continue
-            path = self._extrapolate_robot_path_full(vec)
-            prev = (rcx, rcy)
-            tip = prev
-            for pt in path:
-                px = int(rcx + pt[0] * scale)
-                py = int(rcy - pt[1] * scale)
-                if not (0 <= px < sz and 0 <= py < sz):
-                    break
-                _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
-                prev = (px, py)
-                tip = prev
-            traj_tips[key] = tip
+        # traj_tips = {}  # key: "original" or "corrected" -> (px, py)
+        # for vec, color, key in [
+        #     (self._motion_original,  (255, 255, 0),  "original")
+        #     # (self._motion_modulated, (0, 255, 255),  "corrected"),
+        # ]:
+        #     if vec is None:
+        #         continue
+        #     path = self._extrapolate_robot_path_full(vec)
+        #     prev = (rcx, rcy)
+        #     tip = prev
+        #     for pt in path:
+        #         px = int(rcx + pt[0] * scale)
+        #         py = int(rcy - pt[1] * scale)
+        #         if not (0 <= px < sz and 0 <= py < sz):
+        #             break
+        #         _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
+        #         prev = (px, py)
+        #         tip = prev
+        #     traj_tips[key] = tip
 
         # Correction arrow: original tip -> corrected tip (magenta)
         if self.shield_active and "original" in path_tips and "corrected" in path_tips:
