@@ -1279,6 +1279,27 @@ class SocialNavigator:
                 tip = prev
             path_tips[key] = tip
 
+        # Full Robot trajectory curves
+        traj_tips = {}  # key: "original" or "corrected" -> (px, py)
+        for vec, color, key in [
+            (self._motion_original,  (255, 255, 0),  "original")
+            # (self._motion_modulated, (0, 255, 255),  "corrected"),
+        ]:
+            if vec is None:
+                continue
+            path = self._extrapolate_robot_path_full(vec)
+            prev = (rcx, rcy)
+            tip = prev
+            for pt in path:
+                px = int(rcx + pt[0] * scale)
+                py = int(rcy - pt[1] * scale)
+                if not (0 <= px < sz and 0 <= py < sz):
+                    break
+                _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
+                prev = (px, py)
+                tip = prev
+            traj_tips[key] = tip
+
         # Correction arrow: original tip -> corrected tip (magenta)
         if self.shield_active and "original" in path_tips and "corrected" in path_tips:
             o_tip = path_tips["original"]
@@ -1459,4 +1480,38 @@ class SocialNavigator:
             y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
             theta += omega * dt
             path.append([x, y])
+        return path
+
+    def _extrapolate_robot_path_full(self, motion_vector):
+        """
+        Extrapolate the robot's future path from its current motion vector.
+
+        Uses the same unicycle integration as draw_bev lines 885-906.
+        Returns a list of [x, y] positions in robot frame (robot starts at origin).
+
+        Args:
+            motion_vector: [v_forward, v_lateral, omega_z]
+
+        Returns:
+            list of [x, y] points in robot frame
+        """
+        horizon = self.params["horizon_s"]
+        steps = self.params["horizon_steps"]
+        if steps <= 0:
+            return []
+        dt = horizon / steps
+
+        curvature_alpha = 1.0 # maps x_lateral to curvature
+        goal_distance_threshold = 0.1  # meters
+        [x_lat, depth] = self._goal_rf if self._goal_rf is not None else [None, None]
+        v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
+        x, y, theta = 0.0, 0.0, 0.0
+        path = []
+        for _ in range(100):
+            x += (-v_forward * math.sin(theta) - v_lateral * math.cos(theta)) * dt
+            y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
+            theta += curvature_alpha * x_lat * dt + omega * dt
+            path.append([x, y])
+            if depth > goal_distance_threshold:
+                break
         return path
