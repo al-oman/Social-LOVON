@@ -1556,7 +1556,7 @@ class SocialNavigator:
         # Evaluate cubic Bezier
         return self._return_bezier(p0, p1, p2, p3, steps=steps)
     
-    def _return_bezier(p0, p1, p2, p3, steps=50):
+    def _return_bezier(self, p0, p1, p2, p3, steps=50):
         """
         Evaluate cubic Bezier curve defined by control points p0, p1, p2, p3.
 
