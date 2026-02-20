@@ -1249,16 +1249,10 @@ class SocialNavigator:
             if self._goal_rf is not None:
                 best_traj, best_score = self._get_best_traj(motion)
                 self.diag["best_traj_score"] = best_score
-                if best_traj:
-                    self._best_traj = best_traj
-                else:
-                    # no alternate found — fall back to extrapolated path
-                    self._best_traj = traj if traj else None
-                    self.diag["best_traj_score"] = traj_score
+                self._best_traj = best_traj if best_traj else (traj if traj else None)
             else:
-                print("goal is none")
-                self._best_traj = traj if traj else None
                 self.diag["best_traj_score"] = traj_score
+                self._best_traj = traj if traj else None
         except Exception as e:
             logger.error("_update_diagnostics traj eval FAILED: %s", e, exc_info=True)
 
