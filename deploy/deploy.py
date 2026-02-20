@@ -523,6 +523,7 @@ class VisualLanguageController:
             self.crowdnav_provider.init_render()
             self.motion_vector = [0.0, 0.0, 0.0]
             self.sim_started = False
+            self.crowdnav_sim_frame = self.crowdnav_provider.render_frame()
 
         # Initialize worker threads
         self.image_getter_thread = ImageGetterThread(self)
@@ -755,6 +756,7 @@ class VisualLanguageController:
             self.social_nav._tracked_humans.clear()
             self.social_nav._ego_velocity = None
             self.social_nav._frame_count = 0
+            self.crowdnav_sim_frame = self.crowdnav_provider.render_frame()
         print("Simulation reset. Press Start to begin.")
 
     def _init_channel_factory(self):
