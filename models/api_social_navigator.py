@@ -1202,8 +1202,7 @@ class SocialNavigator:
     def update_goal(self, object_xyn, bbox_height_px):
         """Estimate goal position in robot frame from camera detection."""
         if bbox_height_px is None or bbox_height_px < 10:
-            self._goal_rf = None
-            return
+            return  # keep last valid goal
         depth = self.params["mono_k"] / bbox_height_px
         u_px = object_xyn[0] * self.params["image_width"]
         self._goal_rf = [depth * (u_px - self._cx) / self._fx, depth]
