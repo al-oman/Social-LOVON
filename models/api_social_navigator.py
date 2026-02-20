@@ -1158,6 +1158,8 @@ class SocialNavigator:
 
         elapsed = time.time() - t_start
         logger.warning("_get_best_traj: evaluated %d curves in %.3fs", n_evaluated, elapsed)
+        if best_curve is None:
+            print("No best curve found.")
         return best_curve, best_score
 
     def _trajectory_eval(self, curve):
