@@ -1125,7 +1125,7 @@ class SocialNavigator:
         traj_min_similarity = 1.0 #
 
         [x_lat, depth] = self._goal_rf
-        heading = np.array([0.0, 1.0])
+        heading = np.array([1.0, 0.0])
 
         # P0: robot at origin
         p0 = np.array([0.0, 0.0])
