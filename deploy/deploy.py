@@ -1150,14 +1150,6 @@ class VisualLanguageController:
                 self.image_label.config(image=photo)
                 self.image_label.image = photo
 
-                # Render CrowdNav sim view above BEV
-                if self.crowdnav_sim_mode and self.crowdnav_sim_frame is not None:
-                    sim_rgb = cv2.cvtColor(self.crowdnav_sim_frame, cv2.COLOR_BGR2RGB)
-                    sim_img = Image.fromarray(sim_rgb).resize((400, 400), Image.LANCZOS)
-                    sim_photo = ImageTk.PhotoImage(image=sim_img)
-                    self.crowdnav_label.config(image=sim_photo)
-                    self.crowdnav_label.image = sim_photo
-
                 # Render BEV in its own panel
                 if hasattr(self, 'social_nav'):
                     bev = self.social_nav.render_bev(show_heatmap=True)
@@ -1175,6 +1167,15 @@ class VisualLanguageController:
             pass
         except Exception as e:
             print(f"Image update error: {e}")
+
+        # Render CrowdNav sim view (outside queue dependency so it updates on reset/init too)
+        if self.crowdnav_sim_mode and getattr(self, 'crowdnav_sim_frame', None) is not None:
+            sim_rgb = cv2.cvtColor(self.crowdnav_sim_frame, cv2.COLOR_BGR2RGB)
+            sim_img = Image.fromarray(sim_rgb).resize((400, 400), Image.LANCZOS)
+            sim_photo = ImageTk.PhotoImage(image=sim_img)
+            self.crowdnav_label.config(image=sim_photo)
+            self.crowdnav_label.image = sim_photo
+
         self.root.after(100, self.update_image)
 
     def start_threads(self):
