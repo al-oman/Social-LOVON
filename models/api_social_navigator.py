@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
-from models.safety import robot_safety_score, compute_safety_grid
+from models.safety import robot_safety_score, compute_safety_grid, safety_score_at_point
 
 logger = logging.getLogger("SocialNavigator")
 logger.setLevel(logging.WARNING)
@@ -258,6 +258,7 @@ class SocialNavigator:
 
         # 8. Update diagnostics
         self._update_diagnostics()
+
 
         return modified_vector
 
@@ -1117,7 +1118,7 @@ class SocialNavigator:
         minimum_allowed_safety = 0.5 #
         traj_min_similarity = 1.0 # 
 
-        [x_lat, depth] = self._goal_rf  # [x_lateral, depth] of the human in robot frame
+        [x_lat, depth] = self._goal_rf  if self._goal_rf is not None else [0.0, 0.0] # [x_lateral, depth] of the human in robot frame
         dist = np.linalg.norm([x_lat, depth])
         heading = np.array([0.0, 1.0])
         
@@ -1142,8 +1143,8 @@ class SocialNavigator:
                     curve = self._bezier(p0, p1, p2, p3, steps=steps)
                     score, lowest_safety_val = self._trajectory_eval(curve)
 
-                    traj_similarity = self._trajectory_similarity(curve, )
-                    if score > best_score and lowest_safety_val < minimum_allowed_safety and traj_similarity < traj_min_similarity:
+                    traj_similarity = self._trajectory_similarity(curve, robot_path)
+                    if score > best_score and lowest_safety_val > minimum_allowed_safety and traj_similarity < traj_min_similarity:
                         best_curve = curve
                         best_score = score
 
@@ -1151,12 +1152,36 @@ class SocialNavigator:
 
     def _trajectory_eval(self, curve):
         trajectory_score = 0.0
-        lowest_safety_val = 0.0
+        lowest_safety_val = 1.0
+
+        human_positions = [
+        tuple(human.position_rf)
+        for human in self._tracked_humans.values()
+        if human.position_rf is not None]
+
+        human_predicted_paths = {
+        h.track_id: h.predicted_path
+        for h in self._tracked_humans.values()
+        if h.predicted_path}
+
+        
+        for i in range(len(curve)-1):
+            x, y = curve[i]
+            x2, y2 = curve[i+1]
+            segment_length = np.linalg.norm([x2 - x, y2 - y])
+            segment_safety = safety_score_at_point(x, y, human_positions, human_predicted_paths) * segment_length
+            trajectory_score += segment_safety
+            lowest_safety_val = min(lowest_safety_val, segment_safety)
+
         return trajectory_score, lowest_safety_val
 
     def _trajectory_similarity(self, traj1, traj2):
-        similarity_score = 0.0
-        return similarity_score
+        distances = 0.0
+        assert len(traj1) == len(traj2), "Trajectories must have the same number of points for similarity evaluation."
+        for p1, p2 in zip(traj1, traj2):
+            dist = np.linalg.norm(np.array(p1) - np.array(p2))
+            distances -= dist
+        return 1 / distances if distances != 0 else float('inf')
 
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
@@ -1189,6 +1214,11 @@ class SocialNavigator:
                 "{:.2f}m".format(self.diag["min_distance"]) if self.diag["min_distance"] else "n/a",
                 self.safety_score, self.shield_active,
             )
+        if self.shield_active and self._goal_rf is not None:
+            motion = self._motion_original or [0, 0, 0]
+            best_curve, best_score = self._get_best_traj(motion)
+            logger.info("best_traj_score=%.3f  len=%d", best_score, len(best_curve))
+            self.diag["best_traj_score"] = best_score
 
     # ================================================================== #
     #  Utilities                                                          #
