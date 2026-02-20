@@ -938,6 +938,8 @@ class VisualLanguageController:
         self.state["mission_state_in"] = prediction["predicted_state"]
         self.state["search_state_in"] = prediction["search_state"]
         self.motion_vector = prediction["motion_vector"]
+        if self.state["mission_state_in"] == "success":
+            self.motion_vector = [0.0, 0.0, 0.0]
 
         #-----------------------------------------------------------
         # Addition of Social Nav element! Adjusts the output of L2MM motion vector
