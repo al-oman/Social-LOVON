@@ -1637,7 +1637,7 @@ class SocialNavigator:
         p2 = p3 - goal_dir * (goal_dist / 3.0)
 
         # Evaluate cubic Bezier
-        return self._return_bezier(p0, p1, p2, p3, steps=steps)
+        return self._bezier(p0, p1, p2, p3, steps=steps)
     
     def _construct_bezier(self, p0, tangent_len, p2, steps=50):
         if self._goal_rf is None:
