@@ -390,6 +390,7 @@ class MotionControlThread(threading.Thread):
             synthetic = c.crowdnav_provider.step(mv)
             if synthetic is None:
                 print("CrowdNav episode finished.")
+                c._save_paths()
                 c.sim_started = False
                 return
 
@@ -413,6 +414,20 @@ class MotionControlThread(threading.Thread):
             # Build L2MM input: merge current state with synthetic object fields
             state = {**c.state}
             c._update_motion_control(state, lidar_cloud=synthetic["lidar"])
+
+            # Capture planned Bezier trajectory on first tick with a goal
+            if c._planned_trajectory_world is None and c.social_nav._goal_rf is not None:
+                robot_state = c.crowdnav_provider.robot.get_full_state()
+                path_rf = c.social_nav._extrapolate_robot_path_full(c.motion_vector)
+                if path_rf:
+                    cos_t = math.cos(robot_state.theta)
+                    sin_t = math.sin(robot_state.theta)
+                    c._planned_trajectory_world = []
+                    for pt in path_rf:
+                        x_lat, depth = pt[0], pt[1]
+                        wx = robot_state.px + depth * cos_t + x_lat * sin_t
+                        wy = robot_state.py + depth * sin_t - x_lat * cos_t
+                        c._planned_trajectory_world.append((wx, wy))
 
     def stop(self):
         self.running = False
@@ -525,6 +540,7 @@ class VisualLanguageController:
             self.crowdnav_provider.init_render()
             self.motion_vector = [0.0, 0.0, 0.0]
             self.sim_started = False
+            self._planned_trajectory_world = None  # captured on first goal detection
             self.crowdnav_sim_frame = self.crowdnav_provider.render_frame()
 
         # Initialize worker threads
@@ -624,6 +640,9 @@ class VisualLanguageController:
                    font=self.font_style, width=12).pack(side='left', padx=5)
             Button(sim_control_frame, text="Reset Sim",
                    command=self._reset_sim,
+                   font=self.font_style, width=12).pack(side='left', padx=5)
+            Button(sim_control_frame, text="Save Paths",
+                   command=self._save_paths,
                    font=self.font_style, width=12).pack(side='left', padx=5)
 
         # Mission instruction input area
@@ -754,12 +773,38 @@ class VisualLanguageController:
             self.crowdnav_provider.reset(robot_theta=self.robot_theta)
             self.motion_vector = [0.0, 0.0, 0.0]
             self.state["mission_state_in"] = "success"
+            self._planned_trajectory_world = None
             self.social_nav._predictor.reset()
             self.social_nav._tracked_humans.clear()
             self.social_nav._ego_velocity = None
             self.social_nav._frame_count = 0
             self.crowdnav_sim_frame = self.crowdnav_provider.render_frame()
         print("Simulation reset. Press Start to begin.")
+
+    def _save_paths(self):
+        """Save planned Bezier trajectory and actual robot path to a timestamped txt file."""
+        import datetime
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = f"paths_{ts}.txt"
+
+        actual = self.crowdnav_provider._robot_trajectory  # list of (px, py)
+        planned = self._planned_trajectory_world            # list of (wx, wy) or None
+
+        with open(filepath, 'w') as f:
+            f.write("# Planned trajectory (Bezier, world coords)\n")
+            f.write("# x y\n")
+            if planned:
+                for x, y in planned:
+                    f.write(f"{x:.6f} {y:.6f}\n")
+            else:
+                f.write("# (no planned trajectory captured)\n")
+
+            f.write("\n# Actual robot trajectory (world coords)\n")
+            f.write("# x y\n")
+            for x, y in actual:
+                f.write(f"{x:.6f} {y:.6f}\n")
+
+        print(f"Paths saved to {filepath}")
 
     def _init_channel_factory(self):
         """Initialize Unitree Channel Factory"""
