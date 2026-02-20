@@ -1298,25 +1298,25 @@ class SocialNavigator:
             path_tips[key] = tip
 
         # Full Robot trajectory curves
-        # traj_tips = {}  # key: "original" or "corrected" -> (px, py)
-        # for vec, color, key in [
-        #     (self._motion_original,  (255, 255, 0),  "original")
-        #     # (self._motion_modulated, (0, 255, 255),  "corrected"),
-        # ]:
-        #     if vec is None:
-        #         continue
-        #     path = self._extrapolate_robot_path_full(vec)
-        #     prev = (rcx, rcy)
-        #     tip = prev
-        #     for pt in path:
-        #         px = int(rcx + pt[0] * scale)
-        #         py = int(rcy - pt[1] * scale)
-        #         if not (0 <= px < sz and 0 <= py < sz):
-        #             break
-        #         _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
-        #         prev = (px, py)
-        #         tip = prev
-        #     traj_tips[key] = tip
+        traj_tips = {}  # key: "original" or "corrected" -> (px, py)
+        for vec, color, key in [
+            (self._motion_original,  (255, 255, 0),  "original")
+            # (self._motion_modulated, (0, 255, 255),  "corrected"),
+        ]:
+            if vec is None:
+                continue
+            path = self._extrapolate_robot_path_full(vec)
+            prev = (rcx, rcy)
+            tip = prev
+            for pt in path:
+                px = int(rcx + pt[0] * scale)
+                py = int(rcy - pt[1] * scale)
+                if not (0 <= px < sz and 0 <= py < sz):
+                    break
+                _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
+                prev = (px, py)
+                tip = prev
+            traj_tips[key] = tip
 
         # Correction arrow: original tip -> corrected tip (magenta)
         if self.shield_active and "original" in path_tips and "corrected" in path_tips:
@@ -1500,38 +1500,62 @@ class SocialNavigator:
             path.append([x, y])
         return path
 
-    def _extrapolate_robot_path_full(self, motion_vector):
+    def _extrapolate_robot_path_full(self, motion_vector, steps=50):
         """
-        Extrapolate the robot's future path from its current motion vector.
+        Cubic Bezier curve from robot to goal.
 
-        Uses the same unicycle integration as draw_bev lines 885-906.
-        Returns a list of [x, y] positions in robot frame (robot starts at origin).
+        The curve starts tangent to the current motion_vector direction and
+        arrives at the goal with decreasing curvature (tight turn early,
+        straightening out toward the end).
+
+        Tunable via self.params["path_curvature"]:
+            0.0 → straight line to goal
+            1.0 → default (tangent handle = 1/3 of goal distance)
+            >1  → exaggerated initial arc
 
         Args:
             motion_vector: [v_forward, v_lateral, omega_z]
+            steps:         number of samples along the curve
 
         Returns:
-            list of [x, y] points in robot frame
+            list of [x, y] points in BEV robot frame
         """
-        # horizon = self.params["horizon_s"]
-        # steps = self.params["horizon_steps"]
-        # if steps <= 0:
-        #     return []
-        dt = 0.1
+        if self._goal_rf is None:
+            return []
 
-        curvature_alpha = 1.0 # maps x_lateral to curvature
-        goal_distance_threshold = 0.1  # meters
-        # [x_lat, depth] = self._goal_rf if self._goal_rf is not None else [None, None]
-        [x_lat, depth] = [0.25, 2.0]
-        v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
-        # print(v_forward, v_lateral, omega)
-        x, y, theta = 0.0, 0.0, 0.0
+        curvature = self.params.get("path_curvature", 1.0)
+
+        # P0: robot at origin
+        p0 = np.array([0.0, 0.0])
+
+        # P3: goal in BEV coords [x_lateral, depth]
+        p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
+
+        goal_dist = np.linalg.norm(p3)
+        if goal_dist < 0.05:
+            return []
+
+        # Initial heading from motion_vector (BEV: x = -v_lat, y = v_fwd at theta=0)
+        v_fwd, v_lat = motion_vector[0], motion_vector[1]
+        speed = math.hypot(v_fwd, v_lat)
+        if speed < 1e-4:
+            heading = p3 / goal_dist
+        else:
+            heading = np.array([-v_lat, v_fwd]) / speed
+
+        # P1: extend along initial heading (controls departure curvature)
+        tangent_len = curvature * goal_dist / 3.0
+        p1 = p0 + heading * tangent_len
+
+        # P2: pull back from goal along goal direction (smooth straight arrival)
+        goal_dir = p3 / goal_dist
+        p2 = p3 - goal_dir * (goal_dist / 3.0)
+
+        # Evaluate cubic Bezier
         path = []
-        for _ in range(100):
-            x += (-v_forward * math.sin(theta) - v_lateral * math.cos(theta)) * dt
-            y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
-            theta += curvature_alpha * x_lat * dt + omega * dt
-            path.append([x, y])
-            if depth > goal_distance_threshold:
-                break
+        for i in range(1, steps + 1):
+            t = i / steps
+            s = 1.0 - t
+            pt = s**3 * p0 + 3 * s**2 * t * p1 + 3 * s * t**2 * p2 + t**3 * p3
+            path.append([float(pt[0]), float(pt[1])])
         return path
