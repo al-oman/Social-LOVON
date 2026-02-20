@@ -1206,6 +1206,7 @@ class SocialNavigator:
             "min_distance": min(distances) if distances else None,
             "safety_score": self.safety_score,
             "shield_active": self.shield_active,
+            "best_traj_score": None,
         }
         if self._tracked_humans:
             logger.info(
