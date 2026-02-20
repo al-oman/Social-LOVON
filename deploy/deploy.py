@@ -1029,16 +1029,17 @@ class VisualLanguageController:
 
         if lidar_cloud is None:
             lidar_cloud = self.lidar_getter_thread.get_cloud() if self.lidar_getter_thread else None
+
+        bbox = self.state.get("bounding_box")
+        bbox_h = (bbox[3] - bbox[1]) if bbox else None
+        self.social_nav.update_goal(self.state["object_xyn"], bbox_h)
+
         self.motion_vector = self.social_nav.step(
             motion_vector=self.motion_vector,
             pose_state=self.pose_state,
             mission_state=self.state["mission_state_in"],
             lidar_ranges=lidar_cloud,
         )
-
-        bbox = self.state.get("bounding_box")
-        bbox_h = (bbox[3] - bbox[1]) if bbox else None
-        self.social_nav.update_goal(self.state["object_xyn"], bbox_h)
 
     def _control_robot(self):
         """Send Motion Commands to Robot"""
@@ -1184,7 +1185,8 @@ class VisualLanguageController:
         if best_score is None:
             print("best score is None, cannot display on UI")
         
-        for safety_text, y in zip(safety_texts, y_positions):
+        safety_y_positions = [30 + i * 30 for i in range(len(safety_texts))]
+        for safety_text, y in zip(safety_texts, safety_y_positions):
             (text_width, text_height), baseline = cv2.getTextSize(safety_text, font, font_scale, font_thickness)
             x = image.shape[1] - text_width - 10
             rect_x = x - padding
