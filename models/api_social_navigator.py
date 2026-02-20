@@ -1118,7 +1118,7 @@ class SocialNavigator:
 
         traj_check_range = 3.0 # m
         tangent_range = 3.0 # m
-        tangent_min = 1.0 # m
+        tangent_min = 2.0 # m
         step_size = 1.0 # m (coarse grid for now)
 
         steps = 20 # number of arc segments
@@ -1140,7 +1140,7 @@ class SocialNavigator:
 
         x_lats = np.arange(-traj_check_range, traj_check_range, step_size)
         depths = np.arange(-traj_check_range, traj_check_range, step_size)
-        tangent_lengths = np.arange(tangent_min, tangent_range, step_size)
+        tangent_lengths = np.arange(tangent_min, tangent_range+step_size, step_size)
         best_curve = []
         best_score = 0.0
         n_evaluated = 0
