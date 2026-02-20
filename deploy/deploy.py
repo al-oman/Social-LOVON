@@ -384,34 +384,34 @@ class MotionControlThread(threading.Thread):
         if not getattr(c, 'sim_started', False):
             time.sleep(0.05)
             return
-        mv = c.motion_vector if hasattr(c, 'motion_vector') else [0.0, 0.0, 0.0]
-        synthetic = c.crowdnav_provider.step(mv)
-        if synthetic is None:
-            print("CrowdNav episode finished.")
-            c.sim_started = False
-            return
-
-        # Update controller state from synthetic data
-        c.pose_state = synthetic["pose_state"]
-        c.state.update(synthetic["object_state"])
-
-        # Push blank frame to GUI image queue
-        frame = c.crowdnav_provider.get_blank_frame()
-        img_q = c.image_getter_thread.image_queue
-        if not img_q.empty():
-            try:
-                img_q.get_nowait()
-            except queue.Empty:
-                pass
-        img_q.put(frame)
-
-        # Always render sim view (before motion control, which could fail)
-        c.crowdnav_sim_frame = c.crowdnav_provider.render_frame()
-
-        # Build L2MM input: merge current state with synthetic object fields
-        state = {**c.state}
 
         with c.motion_lock:
+            mv = c.motion_vector if hasattr(c, 'motion_vector') else [0.0, 0.0, 0.0]
+            synthetic = c.crowdnav_provider.step(mv)
+            if synthetic is None:
+                print("CrowdNav episode finished.")
+                c.sim_started = False
+                return
+
+            # Update controller state from synthetic data
+            c.pose_state = synthetic["pose_state"]
+            c.state.update(synthetic["object_state"])
+
+            # Push blank frame to GUI image queue
+            frame = c.crowdnav_provider.get_blank_frame()
+            img_q = c.image_getter_thread.image_queue
+            if not img_q.empty():
+                try:
+                    img_q.get_nowait()
+                except queue.Empty:
+                    pass
+            img_q.put(frame)
+
+            # Always render sim view (before motion control, which could fail)
+            c.crowdnav_sim_frame = c.crowdnav_provider.render_frame()
+
+            # Build L2MM input: merge current state with synthetic object fields
+            state = {**c.state}
             c._update_motion_control(state, lidar_cloud=synthetic["lidar"])
 
     def stop(self):
@@ -747,13 +747,14 @@ class VisualLanguageController:
     def _reset_sim(self):
         """Reset the CrowdNav simulation for a new trial."""
         self.sim_started = False
-        self.crowdnav_provider.reset()
-        self.motion_vector = [0.0, 0.0, 0.0]
-        self.state["mission_state_in"] = "success"
-        self.social_nav._predictor.reset()
-        self.social_nav._tracked_humans.clear()
-        self.social_nav._ego_velocity = None
-        self.social_nav._frame_count = 0
+        with self.motion_lock:
+            self.crowdnav_provider.reset()
+            self.motion_vector = [0.0, 0.0, 0.0]
+            self.state["mission_state_in"] = "success"
+            self.social_nav._predictor.reset()
+            self.social_nav._tracked_humans.clear()
+            self.social_nav._ego_velocity = None
+            self.social_nav._frame_count = 0
         print("Simulation reset. Press Start to begin.")
 
     def _init_channel_factory(self):
