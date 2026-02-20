@@ -435,7 +435,8 @@ class VisualLanguageController:
                  simulation_mode=False, 
                  socialnav_enabled=False,
                  network_device="enp8s0",
-                 crowdnav_sim_mode=False):
+                 crowdnav_sim_mode=False,
+                 robot_theta=None):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
@@ -463,6 +464,7 @@ class VisualLanguageController:
         self.button_update_inst = False
         self.network_device = network_device
         self.crowdnav_sim_mode = crowdnav_sim_mode
+        self.robot_theta = robot_theta
 
         # Initialize RealSense camera if selected
         # if self.camera_type == "realsense":
@@ -519,7 +521,7 @@ class VisualLanguageController:
                 policy_config_path=args.policy_config,
                 target_object=self.extracted_object,
             )
-            self.crowdnav_provider.reset()
+            self.crowdnav_provider.reset(robot_theta=self.robot_theta)
             self.crowdnav_provider.init_render()
             self.motion_vector = [0.0, 0.0, 0.0]
             self.sim_started = False
@@ -749,7 +751,7 @@ class VisualLanguageController:
         """Reset the CrowdNav simulation for a new trial."""
         self.sim_started = False
         with self.motion_lock:
-            self.crowdnav_provider.reset()
+            self.crowdnav_provider.reset(robot_theta=self.robot_theta)
             self.motion_vector = [0.0, 0.0, 0.0]
             self.state["mission_state_in"] = "success"
             self.social_nav._predictor.reset()
@@ -1264,6 +1266,8 @@ if __name__ == "__main__":
                 help='CrowdNav environment config file (crowdnav_sim_mode)')
     parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config',
                 help='CrowdNav policy config file (crowdnav_sim_mode)')
+    parser.add_argument('--robot_theta', type=float, default=None,
+                help='Initial robot heading in radians (crowdnav_sim_mode, default: pi/2)')
     args = parser.parse_args()
 
     # Initialize and run controller
@@ -1283,7 +1287,8 @@ if __name__ == "__main__":
         simulation_mode=args.simulation_mode,
         socialnav_enabled=args.socialnav_enabled,
         network_device=args.network_device, 
-        crowdnav_sim_mode=args.crowdnav_sim_mode
+        crowdnav_sim_mode=args.crowdnav_sim_mode,
+        robot_theta=args.robot_theta
     )
     controller.run()
     print("Program terminated.")

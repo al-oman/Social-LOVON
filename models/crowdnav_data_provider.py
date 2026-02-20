@@ -72,8 +72,10 @@ class CrowdNavDataProvider:
     #  Episode control
     # ------------------------------------------------------------------
 
-    def reset(self, phase='test', test_case=None):
+    def reset(self, phase='test', test_case=None, robot_theta=None):
         self.ob = self.env.reset(phase, test_case)
+        if robot_theta is not None:
+            self.robot.theta = robot_theta
         self.done = False
         self._robot_trajectory = []
         return self.ob
