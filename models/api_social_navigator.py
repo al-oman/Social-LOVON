@@ -1104,7 +1104,7 @@ class SocialNavigator:
         correction = 0.0
         return correction
 
-    def _get_best_traj(self):
+    def _get_best_traj(self, motion_vector):
         """
         Compute angular correction to steer away from a specific human using a Bezier curve approach.
         This is a placeholder for a more advanced correction method that considers the predicted path of the human.
@@ -1115,16 +1115,19 @@ class SocialNavigator:
 
         steps = 50 # number of arc segments
         minimum_allowed_safety = 0.5 #
+        traj_min_similarity = 1.0 # 
 
         [x_lat, depth] = self._goal_rf  # [x_lateral, depth] of the human in robot frame
-        dist = np.linalg(x_lat, depth)
+        dist = np.linalg.norm([x_lat, depth])
         heading = np.array([0.0, 1.0])
         
         # P0: robot at origin
         p0 = np.array([0.0, 0.0])
-
         # P3: goal in BEV coords [x_lateral, depth]
         p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
+
+
+        robot_path = self._extrapolate_robot_path_full(motion_vector, steps=steps)
 
         x_lats = np.arange(-traj_check_range, traj_check_range, step_size)
         depths = np.arange(-traj_check_range, traj_check_range, step_size)
@@ -1137,18 +1140,23 @@ class SocialNavigator:
                     p1 = p0 + heading * l
                     p2 = np.array([x, d])
                     curve = self._bezier(p0, p1, p2, p3, steps=steps)
-                    score, lowest_safety_val = self.trajectory_eval(curve)
+                    score, lowest_safety_val = self._trajectory_eval(curve)
 
-                    if score > best_score and lowest_safety_val < minimum_allowed_safety:
+                    traj_similarity = self._trajectory_similarity(curve, )
+                    if score > best_score and lowest_safety_val < minimum_allowed_safety and traj_similarity < traj_min_similarity:
                         best_curve = curve
                         best_score = score
 
         return best_curve, best_score
 
-    def trajectory_eval(self, curve):
+    def _trajectory_eval(self, curve):
         trajectory_score = 0.0
         lowest_safety_val = 0.0
         return trajectory_score, lowest_safety_val
+
+    def _trajectory_similarity(self, traj1, traj2):
+        similarity_score = 0.0
+        return similarity_score
 
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
