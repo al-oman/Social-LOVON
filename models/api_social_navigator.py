@@ -1144,6 +1144,7 @@ class SocialNavigator:
         best_curve = []
         best_score = 0.0
         n_evaluated = 0
+        best_similarity = 0.0
         for x in x_lats:
             for d in depths:
                 for l in tangent_lengths:
@@ -1157,6 +1158,7 @@ class SocialNavigator:
                     if score > best_score and lowest_safety_val > minimum_allowed_safety:
                         best_curve = curve
                         best_score = score
+                        best_similarity = traj_similarity
 
         elapsed = time.time() - t_start
         logger.warning("_get_best_traj: evaluated %d curves in %.3fs", n_evaluated, elapsed)
@@ -1164,6 +1166,7 @@ class SocialNavigator:
             print("No best curve found.")
         if best_score == 0.0:
             print("No curve with positive score found.")
+        print(best_similarity)
         return best_curve, best_score
 
     def _trajectory_eval(self, curve):
@@ -1232,23 +1235,21 @@ class SocialNavigator:
                 self.safety_score, self.shield_active,
             )
         motion = self._motion_original or [0, 0, 0]
-        traj = self._extrapolate_robot_path_full(motion)
-        traj_score, lowest_safety = self._trajectory_eval(traj)
-        logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
-        self.diag["traj_score"] = traj_score
+        try:
+            traj = self._extrapolate_robot_path_full(motion)
+            traj_score, lowest_safety = self._trajectory_eval(traj)
+            logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
+            self.diag["traj_score"] = traj_score
 
-        if self._goal_rf is not None:
-            try:
+            if self._goal_rf is not None:
                 best_traj, best_score = self._get_best_traj(motion)
                 logger.warning("best_score=%.3f", best_score)
                 self.diag["best_traj_score"] = best_score
                 self._best_traj = best_traj if best_traj else None
-            except Exception as e:
-                logger.error("_get_best_traj FAILED: %s", e, exc_info=True)
-                self.diag["best_traj_score"] = -1.0
+            else:
                 self._best_traj = None
-        else:
-            logger.warning("_goal_rf is None, skipping best traj")
+        except Exception as e:
+            logger.error("_update_diagnostics traj eval FAILED: %s", e, exc_info=True)
             self._best_traj = None
 
 
