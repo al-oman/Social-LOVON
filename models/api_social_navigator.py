@@ -1142,7 +1142,8 @@ class SocialNavigator:
         depths = np.arange(-traj_check_range, traj_check_range, step_size)
         tangent_lengths = np.arange(tangent_min, tangent_range+step_size, step_size)
         best_curve = []
-        best_score = 0.0
+        best_score = -1.0
+        best_lowest_safety = 0.0
         n_evaluated = 0
         best_similarity = 0.0
         for x in x_lats:
@@ -1155,18 +1156,17 @@ class SocialNavigator:
 
                     traj_similarity = self._trajectory_similarity(curve, robot_path)
                     n_evaluated += 1
-                    if score > best_score and lowest_safety_val > minimum_allowed_safety:
+                    if score > best_score:
                         best_curve = curve
                         best_score = score
+                        best_lowest_safety = lowest_safety_val
                         best_similarity = traj_similarity
 
         elapsed = time.time() - t_start
-        logger.warning("_get_best_traj: evaluated %d curves in %.3fs", n_evaluated, elapsed)
-        if best_curve is None:
-            print("No best curve found.")
-        if best_score == 0.0:
-            print("No curve with positive score found.")
-        print(best_similarity)
+        logger.warning(
+            "_get_best_traj: %d curves in %.3fs  best_score=%.3f  lowest_safety=%.3f",
+            n_evaluated, elapsed, best_score, best_lowest_safety,
+        )
         return best_curve, best_score
 
     def _trajectory_eval(self, curve):
