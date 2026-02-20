@@ -163,6 +163,9 @@ class SocialNavigator:
         self.safety_score = 1.0      # 1.0 = fully safe, 0.0 = imminent collision
         self.grid = None
 
+        self.traj_score = 0.05
+        self.best_score = 0.15
+
         # --- Shared lidar-to-image projection (built once per frame) ---
         self._lidar_image_points = None  # (N,5) array: [u_norm, v_norm, lx, ly, lz]
         self._lidar_human_masks = []     # list of boolean masks into _lidar_image_points
@@ -1402,6 +1405,7 @@ class SocialNavigator:
                 self.diag["best_traj_score"] = best_score
                 self._best_traj = best_traj if best_traj else (traj if traj else None)
             else:
+                print("no valid goal")
                 self.diag["best_traj_score"] = traj_score
                 self._best_traj = traj if traj else None
         except Exception as e:
