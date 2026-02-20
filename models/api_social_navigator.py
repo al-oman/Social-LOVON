@@ -1154,7 +1154,7 @@ class SocialNavigator:
 
                     traj_similarity = self._trajectory_similarity(curve, robot_path)
                     n_evaluated += 1
-                    if score > best_score and lowest_safety_val > minimum_allowed_safety and traj_similarity < traj_min_similarity:
+                    if score > best_score and lowest_safety_val > minimum_allowed_safety:
                         best_curve = curve
                         best_score = score
 
