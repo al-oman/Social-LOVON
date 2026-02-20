@@ -1207,6 +1207,7 @@ class SocialNavigator:
             "safety_score": self.safety_score,
             "shield_active": self.shield_active,
             "traj_score": None,
+            "best_traj_score": None,
         }
         if self._tracked_humans:
             logger.info(
@@ -1220,6 +1221,10 @@ class SocialNavigator:
         traj_score, lowest_safety = self._trajectory_eval(traj)
         logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
         self.diag["traj_score"] = traj_score
+
+        best_traj, best_score = self._get_best_traj(motion)
+        logger.info("best_score=%.3f", best_score)
+        self.diag["best_traj_score"] = best_score
 
 
     # ================================================================== #
