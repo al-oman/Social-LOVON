@@ -1110,6 +1110,9 @@ class SocialNavigator:
         Compute angular correction to steer away from a specific human using a Bezier curve approach.
         This is a placeholder for a more advanced correction method that considers the predicted path of the human.
         """
+        if self._goal_rf is None:
+            return [], 0.0
+
         traj_check_range = 3.0 # m
         tangent_range = 3.0 # m
         step_size = 0.25 # m
@@ -1222,9 +1225,10 @@ class SocialNavigator:
         logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
         self.diag["traj_score"] = traj_score
 
-        best_traj, best_score = self._get_best_traj(motion)
-        logger.info("best_score=%.3f", best_score)
-        self.diag["best_traj_score"] = best_score
+        if self._goal_rf is not None:
+            best_traj, best_score = self._get_best_traj(motion)
+            logger.info("best_score=%.3f", best_score)
+            self.diag["best_traj_score"] = best_score
 
 
     # ================================================================== #
