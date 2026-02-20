@@ -1535,13 +1535,8 @@ class SocialNavigator:
         if goal_dist < 0.05:
             return []
 
-        # Initial heading from motion_vector (BEV: x = -v_lat, y = v_fwd at theta=0)
-        v_fwd, v_lat = motion_vector[0], motion_vector[1]
-        speed = math.hypot(v_fwd, v_lat)
-        if speed < 1e-4:
-            heading = p3 / goal_dist
-        else:
-            heading = np.array([-v_lat, v_fwd]) / speed
+        # Robot heading is always forward in robot frame
+        heading = np.array([0.0, 1.0])
 
         # P1: extend along initial heading (controls departure curvature)
         tangent_len = curvature * goal_dist / 3.0
