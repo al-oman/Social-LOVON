@@ -1178,7 +1178,7 @@ class VisualLanguageController:
             safety_texts.append(f"traj score: {traj_score:.2f}")
         if traj_score is None:
             print("traj score is None, cannot display on UI")
-        best_score = self.social_nav.diag.get("best_score")
+        best_score = self.social_nav.diag.get("best_traj_score")
         if best_score is not None:
             safety_texts.append(f"best score: {best_score:.2f}")
         if best_score is None:
