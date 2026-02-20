@@ -1523,7 +1523,7 @@ class SocialNavigator:
         if self._goal_rf is None:
             return []
 
-        curvature = self.params.get("path_curvature", 1.0)
+        curvature = self.params.get("path_curvature", 0.5)
 
         # P0: robot at origin
         p0 = np.array([0.0, 0.0])
