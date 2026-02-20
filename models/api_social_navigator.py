@@ -1224,8 +1224,8 @@ class SocialNavigator:
             "min_distance": min(distances) if distances else None,
             "safety_score": self.safety_score,
             "shield_active": self.shield_active,
-            "traj_score": None,
-            "best_traj_score": None,
+            "traj_score": 0.0,
+            "best_traj_score": 0.0,
         }
         if self._tracked_humans:
             logger.info(
@@ -1238,19 +1238,22 @@ class SocialNavigator:
         try:
             traj = self._extrapolate_robot_path_full(motion)
             traj_score, lowest_safety = self._trajectory_eval(traj)
-            logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
             self.diag["traj_score"] = traj_score
 
             if self._goal_rf is not None:
                 best_traj, best_score = self._get_best_traj(motion)
-                logger.warning("best_score=%.3f", best_score)
                 self.diag["best_traj_score"] = best_score
-                self._best_traj = best_traj if best_traj else None
+                if best_traj:
+                    self._best_traj = best_traj
+                else:
+                    # no alternate found — fall back to extrapolated path
+                    self._best_traj = traj if traj else None
+                    self.diag["best_traj_score"] = traj_score
             else:
-                self._best_traj = None
+                self._best_traj = traj if traj else None
+                self.diag["best_traj_score"] = traj_score
         except Exception as e:
             logger.error("_update_diagnostics traj eval FAILED: %s", e, exc_info=True)
-            self._best_traj = None
 
 
     # ================================================================== #

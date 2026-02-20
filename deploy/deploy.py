@@ -1174,16 +1174,10 @@ class VisualLanguageController:
             safety_texts.append(f"safety score: {safety_score:.2f}")
             safety_texts.append(f"shield active: {sheild_active}")
         
-        # traj_score = self.social_nav.diag.get("traj_score")
-        # if traj_score is not None:
-        #     safety_texts.append(f"traj score: {traj_score:.2f}")
-        # if traj_score is None:
-        #     print("traj score is None, cannot display on UI")
-        best_score = self.social_nav.diag.get("best_traj_score")
-        if best_score is not None:
-            safety_texts.append(f"best score: {best_score:.2f}")
-        if best_score is None:
-            print("best score is None, cannot display on UI")
+        traj_score = self.social_nav.diag.get("traj_score", 0.0)
+        safety_texts.append(f"traj score: {traj_score:.2f}")
+        best_score = self.social_nav.diag.get("best_traj_score", 0.0)
+        safety_texts.append(f"best score: {best_score:.2f}")
         
         safety_y_positions = [30 + i * 30 for i in range(len(safety_texts))]
         for safety_text, y in zip(safety_texts, safety_y_positions):
