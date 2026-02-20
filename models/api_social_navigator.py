@@ -1506,6 +1506,7 @@ class SocialNavigator:
         # [x_lat, depth] = self._goal_rf if self._goal_rf is not None else [None, None]
         [x_lat, depth] = [0.25, 2.0]
         v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
+        # print(v_forward, v_lateral, omega)
         x, y, theta = 0.0, 0.0, 0.0
         path = []
         for _ in range(100):
