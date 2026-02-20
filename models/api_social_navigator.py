@@ -1098,12 +1098,57 @@ class SocialNavigator:
         
         return omega_correction
 
-    def _bezier_curve_correction(self, human):
+    def _bezier_curve_correction(self):
+        best_curve, best_score = self._get_best_traj()
+        # then make it correct velocity to closely match the best curve
+        correction = 0.0
+        return correction
+
+    def _get_best_traj(self):
         """
         Compute angular correction to steer away from a specific human using a Bezier curve approach.
         This is a placeholder for a more advanced correction method that considers the predicted path of the human.
         """
-        pass
+        traj_check_range = 3.0 # m
+        tangent_range = 3.0 # m
+        step_size = 0.25 # m
+
+        steps = 50 # number of arc segments
+        minimum_allowed_safety = 0.5 #
+
+        [x_lat, depth] = self._goal_rf  # [x_lateral, depth] of the human in robot frame
+        dist = np.linalg(x_lat, depth)
+        heading = np.array([0.0, 1.0])
+        
+        # P0: robot at origin
+        p0 = np.array([0.0, 0.0])
+
+        # P3: goal in BEV coords [x_lateral, depth]
+        p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
+
+        x_lats = np.arange(-traj_check_range, traj_check_range, step_size)
+        depths = np.arange(-traj_check_range, traj_check_range, step_size)
+        tangent_lengths = np.arange(0, tangent_range, step_size)
+        best_curve = []
+        best_score = 0.0
+        for x in x_lats:
+            for d in depths:
+                for l in tangent_lengths:
+                    p1 = p0 + heading * l
+                    p2 = np.array([x, d])
+                    curve = self._bezier(p0, p1, p2, p3, steps=steps)
+                    score, lowest_safety_val = self.trajectory_eval(curve)
+
+                    if score > best_score and lowest_safety_val < minimum_allowed_safety:
+                        best_curve = curve
+                        best_score = score
+
+        return best_curve, best_score
+
+    def trajectory_eval(self, curve):
+        trajectory_score = 0.0
+        lowest_safety_val = 0.0
+        return trajectory_score, lowest_safety_val
 
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
@@ -1556,7 +1601,25 @@ class SocialNavigator:
         # Evaluate cubic Bezier
         return self._return_bezier(p0, p1, p2, p3, steps=steps)
     
-    def _return_bezier(self, p0, p1, p2, p3, steps=50):
+    def _construct_bezier(self, p0, tangent_len, p2, steps=50):
+        if self._goal_rf is None:
+            return []
+
+        # P3: goal in BEV coords [x_lateral, depth]
+        p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
+
+        goal_dist = np.linalg.norm(p3)
+        if goal_dist < 0.05:
+            return []
+
+        # Robot heading is always forward in robot frame
+        heading = np.array([0.0, 1.0])
+        p1 = p0 + heading * tangent_len
+
+        # Evaluate cubic Bezier
+        return self._bezier(p0, p1, p2, p3, steps=steps)
+
+    def _bezier(self, p0, p1, p2, p3, steps=50):
         """
         Evaluate cubic Bezier curve defined by control points p0, p1, p2, p3.
 
