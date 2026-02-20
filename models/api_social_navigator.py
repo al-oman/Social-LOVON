@@ -1206,7 +1206,7 @@ class SocialNavigator:
             "min_distance": min(distances) if distances else None,
             "safety_score": self.safety_score,
             "shield_active": self.shield_active,
-            "best_traj_score": None,
+            "traj_score": None,
         }
         if self._tracked_humans:
             logger.info(
@@ -1217,9 +1217,10 @@ class SocialNavigator:
             )
         if self.shield_active and self._goal_rf is not None:
             motion = self._motion_original or [0, 0, 0]
-            best_curve, best_score = self._get_best_traj(motion)
-            logger.info("best_traj_score=%.3f  len=%d", best_score, len(best_curve))
-            self.diag["best_traj_score"] = best_score
+            traj = self._extrapolate_robot_path_full(motion)
+            traj_score, lowest_safety = self._trajectory_eval(traj)
+            logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
+            self.diag["traj_score"] = traj_score
 
     # ================================================================== #
     #  Utilities                                                          #
