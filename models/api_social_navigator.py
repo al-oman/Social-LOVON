@@ -1215,12 +1215,12 @@ class SocialNavigator:
                 "{:.2f}m".format(self.diag["min_distance"]) if self.diag["min_distance"] else "n/a",
                 self.safety_score, self.shield_active,
             )
-        if self.shield_active and self._goal_rf is not None:
-            motion = self._motion_original or [0, 0, 0]
-            traj = self._extrapolate_robot_path_full(motion)
-            traj_score, lowest_safety = self._trajectory_eval(traj)
-            logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
-            self.diag["traj_score"] = traj_score
+        motion = self._motion_original or [0, 0, 0]
+        traj = self._extrapolate_robot_path_full(motion)
+        traj_score, lowest_safety = self._trajectory_eval(traj)
+        logger.info("traj_score=%.3f  lowest_safety=%.3f", traj_score, lowest_safety)
+        self.diag["traj_score"] = traj_score
+
 
     # ================================================================== #
     #  Utilities                                                          #
