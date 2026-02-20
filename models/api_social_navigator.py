@@ -1122,7 +1122,7 @@ class SocialNavigator:
         step_size = 1.0 # m (coarse grid for now)
 
         steps = 20 # number of arc segments
-        minimum_allowed_safety = 0.5 #
+        minimum_allowed_safety = 0.1 #
         traj_min_similarity = 1.0 #
 
         [x_lat, depth] = self._goal_rf
@@ -1156,7 +1156,7 @@ class SocialNavigator:
 
                     traj_similarity = self._trajectory_similarity(curve, robot_path)
                     n_evaluated += 1
-                    if score > best_score:
+                    if score > best_score and lowest_safety_val > minimum_allowed_safety:
                         best_curve = curve
                         best_score = score
                         best_lowest_safety = lowest_safety_val
