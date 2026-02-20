@@ -236,6 +236,7 @@ class SocialNavigator:
         if not self.enabled:
             self._motion_original = list(motion_vector)
             self._motion_modulated = list(motion_vector)
+            self._ego_velocity = list(motion_vector)
             self._update_diagnostics()
             return motion_vector
 
