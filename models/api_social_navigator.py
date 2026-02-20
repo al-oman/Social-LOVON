@@ -1256,6 +1256,7 @@ class SocialNavigator:
                     self._best_traj = traj if traj else None
                     self.diag["best_traj_score"] = traj_score
             else:
+                print("goal is none")
                 self._best_traj = traj if traj else None
                 self.diag["best_traj_score"] = traj_score
         except Exception as e:
