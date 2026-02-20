@@ -1174,9 +1174,9 @@ class VisualLanguageController:
             safety_texts.append(f"safety score: {safety_score:.2f}")
             safety_texts.append(f"shield active: {sheild_active}")
         
-        traj_score = self.social_nav.diag.get("traj_score", 0.0)
+        traj_score = self.social_nav.diag.get("traj_score", "None")
         safety_texts.append(f"traj score: {traj_score:.2f}")
-        best_score = self.social_nav.diag.get("best_traj_score", 0.0)
+        best_score = self.social_nav.diag.get("best_traj_score", "None")
         safety_texts.append(f"best score: {best_score:.2f}")
         
         safety_y_positions = [30 + i * 30 for i in range(len(safety_texts))]
