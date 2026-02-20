@@ -1172,11 +1172,11 @@ class VisualLanguageController:
             safety_texts.append(f"number of humans: {n_humans}")
             safety_texts.append(f"safety score: {safety_score:.2f}")
             safety_texts.append(f"shield active: {sheild_active}")
-            traj_score = self.social_nav.diag.get("traj_score")
-            if traj_score is not None:
-                safety_texts.append(f"traj score: {traj_score:.2f}")
-            if traj_score is None:
-                print("traj score is None, cannot display on UI")
+        traj_score = self.social_nav.diag.get("traj_score")
+        if traj_score is not None:
+            safety_texts.append(f"traj score: {traj_score:.2f}")
+        if traj_score is None:
+            print("traj score is None, cannot display on UI")
         for safety_text, y in zip(safety_texts, y_positions):
             (text_width, text_height), baseline = cv2.getTextSize(safety_text, font, font_scale, font_thickness)
             x = image.shape[1] - text_width - 10
