@@ -16,7 +16,7 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
-from models.safety import robot_safety_score, compute_safety_grid, safety_score_at_point
+from models.safety import robot_safety_score, compute_safety_grid, safety_score_at_point, _safety_scores
 
 logger = logging.getLogger("SocialNavigator")
 logger.setLevel(logging.WARNING)
@@ -94,6 +94,7 @@ class SocialNavigator:
         "horizon_steps": 25,
         "mono_k": 300.0,
         "correction_gain": 25.0,
+        "bezier_omega_gain": 10.0,     # scales omega_candidate from best-traj curvature; >1 = more aggressive
         # --- Camera params  ---
         "image_width": 640,
         "image_height": 480,
@@ -218,19 +219,25 @@ class SocialNavigator:
         self._lidar_image_points = self._project_lidar_to_image(lidar_ranges)
         self._lidar_human_masks = []
 
+        t0 = time.perf_counter()
+
         # --- Perception (always runs so BEV can show humans) ---
 
         # 1. Parse detections from pose_state
         detections = self._parse_pose_state(pose_state)
+        t1 = time.perf_counter()
 
         # 2. Estimate distances + compute robot-frame positions
         self._estimate_distances(detections, lidar_ranges)
+        t2 = time.perf_counter()
 
         # 3. Update tracker (simple ID assignment for now)
         self._update_tracker(detections)
+        t3 = time.perf_counter()
 
         # 4. Predict future trajectories
         self._predict_trajectories()
+        t4 = time.perf_counter()
 
         # --- Safety / correction (only when enabled) ---
 
@@ -243,12 +250,15 @@ class SocialNavigator:
 
         # 5. Compute safety score
         self.safety_score = self._compute_safety_score()
+        t5 = time.perf_counter()
 
         # 6. Shield gate -- decide whether to intervene
         self.shield_active = self._evaluate_shield(mission_state)
+        t6 = time.perf_counter()
 
         # 7. Command correction (only when shield is active)
         modified_vector = self._correct_command(motion_vector)
+        t7 = time.perf_counter()
 
         # Store both for BEV visualisation
         self._motion_original = list(motion_vector)
@@ -258,75 +268,101 @@ class SocialNavigator:
         self._ego_velocity = list(modified_vector)
 
         # 8. Update diagnostics
+        t8 = time.perf_counter()
         self._update_diagnostics()
+        t9 = time.perf_counter()
 
+        # print(
+        #     f"step stages (ms)  1={( t1-t0)*1e3:.1f}  2={( t2-t1)*1e3:.1f}  "
+        #     f"3={( t3-t2)*1e3:.1f}  4={( t4-t3)*1e3:.1f}  5={( t5-t4)*1e3:.1f}  "
+        #     f"6={( t6-t5)*1e3:.1f}  7={( t7-t6)*1e3:.1f}  8={( t8-t7)*1e3:.1f}  "
+        #     f"total={(t8-t0)*1e3:.1f}"
+        # )
+        print(f"diag time: {t9-t8}")
 
         return modified_vector
 
-    def step_ground_truth(self, motion_vector, gt_humans, mission_state):
-        """
-        Entry point for ground-truth human data (e.g. from CrowdNav simulator).
+    # def step_ground_truth(self, motion_vector, gt_humans, mission_state):
+    #     """
+    #     Entry point for ground-truth human data (e.g. from CrowdNav simulator).
 
-        Bypasses perception stages 1-3 (detection, distance estimation, tracking)
-        and directly populates _tracked_humans from pre-computed robot-frame data.
-        Then runs stages 4-8 as normal.
+    #     Bypasses perception stages 1-3 (detection, distance estimation, tracking)
+    #     and directly populates _tracked_humans from pre-computed robot-frame data.
+    #     Then runs stages 4-8 as normal.
 
-        Args:
-            motion_vector: [v_x, v_y, omega_z] from L2MM
-            gt_humans:     list of dicts, each with keys:
-                             track_id:     int
-                             position_rf:  [x_lateral, depth] in robot frame
-                             distance:     float meters
-                             velocity:     [vx_lateral, v_depth] in robot frame
-                             radius:       float meters
-            mission_state: str, current state machine state
+    #     Args:
+    #         motion_vector: [v_x, v_y, omega_z] from L2MM
+    #         gt_humans:     list of dicts, each with keys:
+    #                          track_id:     int
+    #                          position_rf:  [x_lateral, depth] in robot frame
+    #                          distance:     float meters
+    #                          velocity:     [vx_lateral, v_depth] in robot frame
+    #                          radius:       float meters
+    #         mission_state: str, current state machine state
 
-        Returns:
-            motion_vector: [v_x, v_y, omega_z] (possibly corrected)
-        """
-        if not self.enabled:
-            return motion_vector
+    #     Returns:
+    #         motion_vector: [v_x, v_y, omega_z] (possibly corrected)
+    #     """
+    #     if not self.enabled:
+    #         return motion_vector
 
-        self._frame_count += 1
-        self._lidar_ranges = None
-        # --- Directly populate _tracked_humans (bypass stages 1-3) ---
-        self._tracked_humans.clear()
-        for gh in gt_humans:
-            tid = gh["track_id"]
-            human = TrackedHuman(track_id=tid)
-            human.position_rf = gh["position_rf"]
-            human.distance = gh["distance"]
-            human.velocity = gh.get("velocity")
-            human.confidence = 1.0
-            human.last_seen = time.time()
-            self._tracked_humans[tid] = human
+    #     self._frame_count += 1
+    #     self._lidar_ranges = None
 
-        # --- Cache robot predicted path for safety scoring + BEV ---
-        self._robot_predicted_path = self._extrapolate_robot_path(motion_vector)
+    #     t0 = time.perf_counter()
+    #     print(60*"=")
+    #     # --- Directly populate _tracked_humans (bypass stages 1-3) ---
+    #     self._tracked_humans.clear()
+    #     for gh in gt_humans:
+    #         tid = gh["track_id"]
+    #         human = TrackedHuman(track_id=tid)
+    #         human.position_rf = gh["position_rf"]
+    #         human.distance = gh["distance"]
+    #         human.velocity = gh.get("velocity")
+    #         human.confidence = 1.0
+    #         human.last_seen = time.time()
+    #         self._tracked_humans[tid] = human
 
-        # 4. Predict future trajectories
-        self._predict_trajectories()
+    #     # --- Cache robot predicted path for safety scoring + BEV ---
+    #     self._robot_predicted_path = self._extrapolate_robot_path(motion_vector)
 
-        # 5. Compute safety score
-        self.safety_score = self._compute_safety_score()
+    #     t1 = time.perf_counter()
 
-        # 6. Shield gate
-        self.shield_active = self._evaluate_shield(mission_state)
+    #     # 4. Predict future trajectories
+    #     self._predict_trajectories()
+    #     t2 = time.perf_counter()
 
-        # 7. Command correction
-        modified_vector = self._correct_command(motion_vector)
+    #     # 5. Compute safety score
+    #     self.safety_score = self._compute_safety_score()
+    #     t3 = time.perf_counter()
 
-        # Store both for BEV visualisation
-        self._motion_original = list(motion_vector)
-        self._motion_modulated = list(modified_vector)
+    #     # 6. Shield gate
+    #     self.shield_active = self._evaluate_shield(mission_state)
+    #     t4 = time.perf_counter()
 
-        # Store executed velocity for ego-motion compensation next frame
-        self._ego_velocity = list(modified_vector)
+    #     # 7. Command correction
+    #     modified_vector = self._correct_command(motion_vector)
+    #     t5 = time.perf_counter()
 
-        # 8. Update diagnostics
-        self._update_diagnostics()
+    #     # Store both for BEV visualisation
+    #     self._motion_original = list(motion_vector)
+    #     self._motion_modulated = list(modified_vector)
 
-        return modified_vector
+    #     # Store executed velocity for ego-motion compensation next frame
+    #     self._ego_velocity = list(modified_vector)
+
+    #     # 8. Update diagnostics
+    #     self._update_diagnostics()
+    #     t6 = time.perf_counter()
+
+    #     print(
+    #         f"step_gt stages (ms)  1-3bypass={( t1-t0)*1e3:.1f}  "
+    #         f"4={( t2-t1)*1e3:.1f}  5={( t3-t2)*1e3:.1f}  "
+    #         f"6={( t4-t3)*1e3:.1f}  7={( t5-t4)*1e3:.1f}  "
+    #         f"8={( t6-t5)*1e3:.1f}  total={(t6-t0)*1e3:.1f}"
+    #     )
+
+    #     return modified_vector
 
     # ================================================================== #
     #  STAGE 1 -- Parse pose_state into detection dicts                   #
@@ -1066,9 +1102,7 @@ class SocialNavigator:
             resolution=bev_range / 50,
         )
 
-        # Scale correction proportionally to threat level so it ramps
-        # up smoothly rather than snapping to full strength at the threshold.
-        omega_correction = self._potential_field_correction() * threat
+        omega_correction = self._bezier_curve_correction(motion_vector)
         vx_corrected = vx
         vy_corrected = vy
         omega_corrected = omega + omega_correction
@@ -1100,13 +1134,37 @@ class SocialNavigator:
         
         return omega_correction
 
-    def _bezier_curve_correction(self):
+    def _bezier_curve_correction(self, motion_vector):
         best_curve, best_score = self._get_best_traj()
-        # then make it correct velocity to closely match the best curve
-        correction = 0.0
-        return correction
+        if not best_curve:
+            return 0.0
 
-    def _get_best_traj(self, motion_vector):
+        # Store for BEV visualisation.
+        self._best_traj = best_curve
+
+        # Infer the omega that would produce the best curve from its heading change.
+        pts = np.asarray(best_curve, dtype=np.float64)
+        first_seg = pts[1]  - pts[0]
+        last_seg  = pts[-1] - pts[-2]
+        theta_0 = math.atan2(float(first_seg[0]), float(first_seg[1]))
+        theta_f = math.atan2(float(last_seg[0]),  float(last_seg[1]))
+        delta_theta = (theta_f - theta_0 + math.pi) % (2 * math.pi) - math.pi
+
+        # Traversal time from arc length + forward speed (not horizon_s, which
+        # is unrelated to the Bezier curve's geometry).
+        diffs = pts[1:] - pts[:-1]
+        arc_length = float(np.hypot(diffs[:, 0], diffs[:, 1]).sum())
+        v_fwd = motion_vector[0]
+        traversal_time = arc_length / v_fwd if v_fwd > 0.01 else self.params["horizon_s"]
+
+        # Sign: positive omega = turn left = negative x in robot frame.
+        # atan2(dx, dy) gives positive angle for rightward dx, which is opposite
+        # to the unicycle convention, so negate.
+        omega_candidate = self.params["bezier_omega_gain"] * delta_theta / traversal_time
+
+        return omega_candidate - motion_vector[2]
+
+    def _get_best_traj(self):
         """
         Compute angular correction to steer away from a specific human using a Bezier curve approach.
         This is a placeholder for a more advanced correction method that considers the predicted path of the human.
@@ -1116,14 +1174,12 @@ class SocialNavigator:
 
         t_start = time.time()
 
-        traj_check_range = 3.0 # m
-        tangent_range = 3.0 # m
-        tangent_min = 2.0 # m
-        step_size = 1.0 # m (coarse grid for now)
+        check_range = 2.0 # m
+        step_size = 0.25 # m (coarse grid for now)
 
         steps = 20 # number of arc segments
-        minimum_allowed_safety = 0.1 #
-        traj_min_similarity = 1.0 #
+        # minimum_allowed_safety = 0.1 #
+        # traj_min_similarity = 1.0 #
 
         [x_lat, depth] = self._goal_rf
         heading = np.array([0.0, 1.0])
@@ -1133,35 +1189,42 @@ class SocialNavigator:
         # P3: goal in BEV coords [x_lateral, depth]
         p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
 
-        robot_path = self._extrapolate_robot_path_full(motion_vector, steps=steps)
-        if not robot_path:
-            logger.info("_get_best_traj: no robot_path, elapsed=%.3fs", time.time() - t_start)
-            return [], 0.0
+        # robot_path = self._extrapolate_robot_path_full(motion_vector, steps=steps)
+        # if not robot_path:
+        #     logger.info("_get_best_traj: no robot_path, elapsed=%.3fs", time.time() - t_start)
+        #     return [], 0.0
 
-        x_lats = np.arange(-traj_check_range, traj_check_range, step_size)
-        depths = np.arange(-traj_check_range, traj_check_range, step_size)
-        tangent_lengths = np.arange(tangent_min, tangent_range+step_size, step_size)
+        # Pre-extract human data once for the whole batch.
+        _human_positions = [
+            tuple(h.position_rf)
+            for h in self._tracked_humans.values()
+            if h.position_rf is not None
+        ]
+        _human_predicted_paths = {
+            h.track_id: h.predicted_path
+            for h in self._tracked_humans.values()
+            if h.predicted_path
+        }
+
+        x_offsets = np.arange(x_lat- check_range, x_lat + check_range, step_size)
         best_curve = []
         best_score = -1.0
         best_lowest_safety = 0.0
         n_evaluated = 0
         best_similarity = 0.0
-        for x in x_lats:
-            for d in depths:
-                for l in tangent_lengths:
-                    p1 = p0 + heading * l
-                    p2 = np.array([x, d])
-                    curve = self._bezier(p0, p1, p2, p3, steps=steps)
-                    score, lowest_safety_val = self._trajectory_eval(curve)
+        for x_offset in x_offsets:
+            curve = self._construct_bezier(x_offset, steps=steps)
+            score, lowest_safety_val = self._trajectory_eval_v2(
+                curve, _human_positions, _human_predicted_paths)
 
-                    traj_similarity = self._trajectory_similarity(curve, robot_path)
-                    n_evaluated += 1
-                    if score > best_score:
-                        best_curve = curve
-                        best_score = score
-                        best_lowest_safety = lowest_safety_val
-                        best_similarity = traj_similarity
+            traj_similarity = self._trajectory_similarity_v2(curve)
 
+            n_evaluated += 1
+            if score > best_score:
+                best_curve = curve
+                best_score = score
+                best_lowest_safety = lowest_safety_val
+                best_similarity = traj_similarity
         elapsed = time.time() - t_start
         logger.warning(
             "_get_best_traj: %d curves in %.3fs  best_score=%.3f  lowest_safety=%.3f best_similarity=%.3f",
@@ -1200,6 +1263,56 @@ class SocialNavigator:
 
         return trajectory_score, lowest_safety_val
 
+    def _trajectory_eval_v2(self, curve,
+                            _human_positions=None,
+                            _human_predicted_paths=None):
+        """Vectorized replacement for _trajectory_eval.
+
+        Differences from the original:
+        - Safety is evaluated over all curve points in a SINGLE _safety_scores()
+          call (array inputs) instead of one safety_score_at_point() per point.
+        - Segment lengths are computed with a single np.hypot() on diff arrays.
+        - The caller (_get_best_traj) can pre-supply human data once for the
+          entire batch instead of rebuilding it on every curve evaluation.
+        - Midpoint rule for arc-length weighting (slightly more accurate).
+        """
+        if len(curve) < 2:
+            return 0.0, 0.0
+
+        # Allow caller to pre-supply these so they are not rebuilt per-curve.
+        if _human_positions is None:
+            _human_positions = [
+                tuple(h.position_rf)
+                for h in self._tracked_humans.values()
+                if h.position_rf is not None
+            ]
+        if _human_predicted_paths is None:
+            _human_predicted_paths = {
+                h.track_id: h.predicted_path
+                for h in self._tracked_humans.values()
+                if h.predicted_path
+            }
+
+        pts = np.asarray(curve, dtype=np.float64)   # (S, 2)
+
+        # One vectorized safety call for all S points.
+        safety = _safety_scores(pts[:, 0], pts[:, 1],
+                                _human_positions, _human_predicted_paths)  # (S,)
+
+        # Segment lengths via vectorized diff + hypot.
+        diffs = pts[1:] - pts[:-1]                          # (S-1, 2)
+        seg_lengths = np.hypot(diffs[:, 0], diffs[:, 1])    # (S-1,)
+
+        # Arc-length-weighted average using midpoint safety per segment.
+        seg_safety = (safety[:-1] + safety[1:]) * 0.5       # (S-1,)
+        total_length = seg_lengths.sum()
+        if total_length == 0.0:
+            return 0.0, float(safety.min())
+
+        trajectory_score = float((seg_safety * seg_lengths).sum() / total_length)
+        lowest_safety_val = float(safety.min())
+        return trajectory_score, lowest_safety_val
+
     def _trajectory_similarity(self, traj1, traj2):
         distances = 0.0
         assert len(traj1) == len(traj2), "Trajectories must have the same number of points for similarity evaluation."
@@ -1207,6 +1320,44 @@ class SocialNavigator:
             dist = np.linalg.norm(np.array(p1) - np.array(p2))
             distances -= dist
         return 1 / distances if distances != 0 else float('inf')
+    
+    def _trajectory_similarity_v2(self, test_traj):
+        """
+        Infer the motion vector implied by test_traj and compare it to the
+        robot's current motion vector (self._motion_original).
+
+        The candidate motion vector is [v_x_original, v_y_original, omega_candidate],
+        where omega_candidate is estimated from the heading change across test_traj
+        (total delta_theta / horizon_s).  v_x and v_y are held fixed at the original
+        values since the trajectory search only varies curvature (omega), not speed.
+
+        Returns:
+            delta_omega (rad/s) -- angular rate difference between the candidate
+            trajectory and the robot's current command.  Lower = more similar.
+        """
+        if len(test_traj) < 2 or self._motion_original is None:
+            return float('inf')
+
+        pts = np.asarray(test_traj, dtype=np.float64)  # (S, 2)
+
+        # --- Infer omega from heading change across the trajectory ---
+        # In robot frame (+y = forward, +x = lateral), segment heading is
+        # atan2(dx, dy).  The robot starts facing +y so theta_0 ~ 0.
+        first_seg = pts[1]  - pts[0]   # early segment direction
+        last_seg  = pts[-1] - pts[-2]  # final segment direction
+
+        theta_0 = math.atan2(float(first_seg[0]), float(first_seg[1]))
+        theta_f = math.atan2(float(last_seg[0]),  float(last_seg[1]))
+
+        # Shortest angular distance in [-pi, pi]
+        delta_theta = (theta_f - theta_0 + math.pi) % (2 * math.pi) - math.pi
+
+        horizon_s = self.params["horizon_s"]
+        omega_candidate = delta_theta / horizon_s if horizon_s > 0.0 else 0.0
+
+        # --- Raw angular rate difference (rad/s) ---
+        omega_original = self._motion_original[2]
+        return abs(omega_candidate - omega_original)
 
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
@@ -1247,7 +1398,7 @@ class SocialNavigator:
             self.diag["traj_score"] = traj_score
 
             if self._goal_rf is not None:
-                best_traj, best_score = self._get_best_traj(motion)
+                best_traj, best_score = self._get_best_traj()
                 self.diag["best_traj_score"] = best_score
                 self._best_traj = best_traj if best_traj else (traj if traj else None)
             else:
@@ -1455,6 +1606,8 @@ class SocialNavigator:
                     break
                 _cv2.line(bev, prev, (px, py), (0, 255, 0), 2, _cv2.LINE_AA)
                 prev = (px, py)
+        else:
+            logger.info("self.best_traj is None")
 
         # Correction arrow: original tip -> corrected tip (magenta)
         if self.shield_active and "original" in path_tips and "corrected" in path_tips:
@@ -1584,7 +1737,6 @@ class SocialNavigator:
             extent:      [xmin, xmax, ymin, ymax] for imshow
             Returns (None, None) if no humans are tracked.
         """
-
         human_positions = [
             tuple(h.position_rf)
             for h in self._tracked_humans.values()
@@ -1688,20 +1840,25 @@ class SocialNavigator:
         # Evaluate cubic Bezier
         return self._bezier(p0, p1, p2, p3, steps=steps)
     
-    def _construct_bezier(self, p0, tangent_len, p2, steps=50):
+    def _construct_bezier(self, x_offset, steps=50):
         if self._goal_rf is None:
             return []
 
         # P3: goal in BEV coords [x_lateral, depth]
-        p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
+        x_lat, depth = self._goal_rf[0], self._goal_rf[1]
+        p3 = np.array([x_lat, depth])
 
         goal_dist = np.linalg.norm(p3)
         if goal_dist < 0.05:
             return []
 
+        curvature = self.params.get("path_curvature", 0.5)
+
         # Robot heading is always forward in robot frame
         heading = np.array([0.0, 1.0])
-        p1 = p0 + heading * tangent_len
+        p0 = np.array([0.0, 0.0])
+        p1 = p0 + heading * curvature * goal_dist /3 
+        p2 = p1 + np.array([x_offset, depth * (1/5)])
 
         # Evaluate cubic Bezier
         return self._bezier(p0, p1, p2, p3, steps=steps)
@@ -1712,10 +1869,7 @@ class SocialNavigator:
 
         Returns a list of [x, y] points along the curve.
         """
-        path = []
-        for i in range(steps + 1):
-            t = i / steps
-            s = 1.0 - t
-            pt = s**3 * p0 + 3 * s**2 * t * p1 + 3 * s * t**2 * p2 + t**3 * p3
-            path.append([float(pt[0]), float(pt[1])])
-        return path
+        t = np.linspace(0.0, 1.0, steps + 1)[:, None]  # (S+1, 1)
+        s = 1.0 - t
+        pts = s**3 * p0 + 3*s**2*t * p1 + 3*s*t**2 * p2 + t**3 * p3  # (S+1, 2)
+        return pts.tolist()
