@@ -1162,6 +1162,8 @@ class SocialNavigator:
         logger.warning("_get_best_traj: evaluated %d curves in %.3fs", n_evaluated, elapsed)
         if best_curve is None:
             print("No best curve found.")
+        if best_score == 0.0:
+            print("No curve with positive score found.")
         return best_curve, best_score
 
     def _trajectory_eval(self, curve):
@@ -1183,9 +1185,9 @@ class SocialNavigator:
             x, y = curve[i]
             x2, y2 = curve[i+1]
             segment_length = np.linalg.norm([x2 - x, y2 - y])
-            raw_safety = safety_score_at_point(x, y, human_positions, human_predicted_paths)
-            trajectory_score += raw_safety * segment_length / len(curve)
-            lowest_safety_val = min(lowest_safety_val, raw_safety)
+            safety_at_point = safety_score_at_point(x, y, human_positions, human_predicted_paths)
+            trajectory_score += safety_at_point * segment_length / len(curve)
+            lowest_safety_val = min(lowest_safety_val, safety_at_point)
 
         return trajectory_score, lowest_safety_val
 
