@@ -173,6 +173,7 @@ class SocialNavigator:
         self._robot_predicted_path = None  # list of [x, y] in robot frame
         self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
         self._goal_rf = None               # [x_lateral, depth] estimated goal position
+        self._best_traj = None             # best trajectory from _get_best_traj
 
         # --- Diagnostics ---
         self.diag = {
@@ -1234,9 +1235,18 @@ class SocialNavigator:
         self.diag["traj_score"] = traj_score
 
         if self._goal_rf is not None:
-            best_traj, best_score = self._get_best_traj(motion)
-            logger.info("best_score=%.3f", best_score)
-            self.diag["best_traj_score"] = best_score
+            try:
+                best_traj, best_score = self._get_best_traj(motion)
+                logger.warning("best_score=%.3f", best_score)
+                self.diag["best_traj_score"] = best_score
+                self._best_traj = best_traj if best_traj else None
+            except Exception as e:
+                logger.error("_get_best_traj FAILED: %s", e, exc_info=True)
+                self.diag["best_traj_score"] = -1.0
+                self._best_traj = None
+        else:
+            logger.warning("_goal_rf is None, skipping best traj")
+            self._best_traj = None
 
 
     # ================================================================== #
@@ -1427,6 +1437,17 @@ class SocialNavigator:
                 tip = prev
             traj_tips[key] = tip
 
+        # Best trajectory curve (green)
+        if self._best_traj:
+            prev = (rcx, rcy)
+            for pt in self._best_traj:
+                px = int(rcx + pt[0] * scale)
+                py = int(rcy - pt[1] * scale)
+                if not (0 <= px < sz and 0 <= py < sz):
+                    break
+                _cv2.line(bev, prev, (px, py), (0, 255, 0), 2, _cv2.LINE_AA)
+                prev = (px, py)
+
         # Correction arrow: original tip -> corrected tip (magenta)
         if self.shield_active and "original" in path_tips and "corrected" in path_tips:
             o_tip = path_tips["original"]
@@ -1436,9 +1457,10 @@ class SocialNavigator:
                                  (255, 0, 255), 2, _cv2.LINE_AA, tipLength=0.3)
 
         # Legend
-        lx, ly = 10, sz - 60
+        lx, ly = 10, sz - 75
         for label, color in [("Original", (255, 255, 0)),
                               ("Corrected", (0, 255, 255)),
+                              ("Best Traj", (0, 255, 0)),
                               ("Correction", (255, 0, 255))]:
             _cv2.line(bev, (lx, ly), (lx + 20, ly), color, 2, _cv2.LINE_AA)
             _cv2.putText(bev, label, (lx + 25, ly + 4),
