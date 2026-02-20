@@ -1182,9 +1182,9 @@ class SocialNavigator:
             x, y = curve[i]
             x2, y2 = curve[i+1]
             segment_length = np.linalg.norm([x2 - x, y2 - y])
-            segment_safety = safety_score_at_point(x, y, human_positions, human_predicted_paths) * segment_length
-            trajectory_score += segment_safety
-            lowest_safety_val = min(lowest_safety_val, segment_safety)
+            raw_safety = safety_score_at_point(x, y, human_positions, human_predicted_paths)
+            trajectory_score += raw_safety * segment_length
+            lowest_safety_val = min(lowest_safety_val, raw_safety)
 
         return trajectory_score, lowest_safety_val
 
