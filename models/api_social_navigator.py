@@ -936,6 +936,23 @@ class SocialNavigator:
                 self._predictor.predicted_trajectories.pop(agent_id, None)
                 continue
 
+            # De-duplicate: if an observed human is near the ghost's predicted
+            # position, they are the same person re-entering FOV with a new
+            # tracker ID.  Discard the stale predictor entry.
+            merged = False
+            for obs in self._tracked_humans.values():
+                if obs.position_rf is None:
+                    continue
+                dist = math.hypot(ghost_pos[0] - obs.position_rf[0],
+                                  ghost_pos[1] - obs.position_rf[1])
+                if dist < 1.0:  # meters
+                    del self._predictor.agent_trajectories[agent_id]
+                    self._predictor.predicted_trajectories.pop(agent_id, None)
+                    merged = True
+                    break
+            if merged:
+                continue
+
             # Create ghost TrackedHuman
             ghost = TrackedHuman(agent_id)
             ghost.is_ghost = True
