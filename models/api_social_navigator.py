@@ -1184,13 +1184,19 @@ class SocialNavigator:
         if h.predicted_path}
 
         
+        total_length = 0.0
         for i in range(len(curve)-1):
             x, y = curve[i]
             x2, y2 = curve[i+1]
             segment_length = np.linalg.norm([x2 - x, y2 - y])
             safety_at_point = safety_score_at_point(x, y, human_positions, human_predicted_paths)
-            trajectory_score += safety_at_point * segment_length / len(curve)
+            trajectory_score += safety_at_point * segment_length
+            total_length += segment_length
             lowest_safety_val = min(lowest_safety_val, safety_at_point)
+
+        # Normalize by total arc length so score is average safety [0, 1]
+        if total_length > 0:
+            trajectory_score /= total_length
 
         return trajectory_score, lowest_safety_val
 
