@@ -381,11 +381,14 @@ class MotionControlThread(threading.Thread):
 
     def _crowdnav_tick(self):
         c = self.controller
+        if not getattr(c, 'sim_started', False):
+            time.sleep(0.05)
+            return
         mv = c.motion_vector if hasattr(c, 'motion_vector') else [0.0, 0.0, 0.0]
         synthetic = c.crowdnav_provider.step(mv)
         if synthetic is None:
             print("CrowdNav episode finished.")
-            self.running = False
+            c.sim_started = False
             return
 
         # Update controller state from synthetic data
@@ -519,6 +522,7 @@ class VisualLanguageController:
             self.crowdnav_provider.reset()
             self.crowdnav_provider.init_render()
             self.motion_vector = [0.0, 0.0, 0.0]
+            self.sim_started = False
 
         # Initialize worker threads
         self.image_getter_thread = ImageGetterThread(self)
@@ -605,9 +609,19 @@ class VisualLanguageController:
         control_frame.pack(pady=10, padx=10, anchor='n')
         # Button(control_frame, text="Damp", command=self.sport_client.Damp,
         #        font=self.font_style, width=15).pack(side='left', padx=5)
-        Button(control_frame, text="Damp", 
-               command=lambda: print("Damp command") if self.simulation_mode else self.sport_client.Damp, 
+        Button(control_frame, text="Damp",
+               command=lambda: print("Damp command") if self.simulation_mode else self.sport_client.Damp,
                font=self.font_style, width=15).pack(side='left', padx=5)
+
+        if self.crowdnav_sim_mode:
+            sim_control_frame = Frame(self.instruction_frame)
+            sim_control_frame.pack(pady=5, padx=10, anchor='n')
+            Button(sim_control_frame, text="Start Sim",
+                   command=self._start_sim,
+                   font=self.font_style, width=12).pack(side='left', padx=5)
+            Button(sim_control_frame, text="Reset Sim",
+                   command=self._reset_sim,
+                   font=self.font_style, width=12).pack(side='left', padx=5)
 
         # Mission instruction input area
         initial_instructions = [
@@ -724,6 +738,23 @@ class VisualLanguageController:
             self.state["mission_state_in"] = "running"
             print(f"Updated Mission Instruction: {self.mission_instruction_1}")
             self.update_ui_labels()  # Immediately update UI
+
+    def _start_sim(self):
+        """Start the CrowdNav simulation."""
+        self.sim_started = True
+        print("Simulation started.")
+
+    def _reset_sim(self):
+        """Reset the CrowdNav simulation for a new trial."""
+        self.sim_started = False
+        self.crowdnav_provider.reset()
+        self.motion_vector = [0.0, 0.0, 0.0]
+        self.state["mission_state_in"] = "success"
+        self.social_nav._predictor.reset()
+        self.social_nav._tracked_humans.clear()
+        self.social_nav._ego_velocity = None
+        self.social_nav._frame_count = 0
+        print("Simulation reset. Press Start to begin.")
 
     def _init_channel_factory(self):
         """Initialize Unitree Channel Factory"""
