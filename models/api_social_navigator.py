@@ -1098,6 +1098,13 @@ class SocialNavigator:
         
         return omega_correction
 
+    def _bezier_curve_correction(self, human):
+        """
+        Compute angular correction to steer away from a specific human using a Bezier curve approach.
+        This is a placeholder for a more advanced correction method that considers the predicted path of the human.
+        """
+        pass
+
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
     # ================================================================== #
@@ -1547,8 +1554,16 @@ class SocialNavigator:
         p2 = p3 - goal_dir * (goal_dist / 3.0)
 
         # Evaluate cubic Bezier
+        return self._return_bezier(p0, p1, p2, p3, steps=steps)
+    
+    def _return_bezier(p0, p1, p2, p3, steps=50):
+        """
+        Evaluate cubic Bezier curve defined by control points p0, p1, p2, p3.
+
+        Returns a list of [x, y] points along the curve.
+        """
         path = []
-        for i in range(1, steps + 1):
+        for i in range(steps + 1):
             t = i / steps
             s = 1.0 - t
             pt = s**3 * p0 + 3 * s**2 * t * p1 + 3 * s * t**2 * p2 + t**3 * p3
