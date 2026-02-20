@@ -1113,31 +1113,35 @@ class SocialNavigator:
         if self._goal_rf is None:
             return [], 0.0
 
+        t_start = time.time()
+
         traj_check_range = 3.0 # m
         tangent_range = 3.0 # m
-        step_size = 0.25 # m
+        step_size = 1.0 # m (coarse grid for now)
 
-        steps = 50 # number of arc segments
+        steps = 20 # number of arc segments
         minimum_allowed_safety = 0.5 #
-        traj_min_similarity = 1.0 # 
+        traj_min_similarity = 1.0 #
 
-        [x_lat, depth] = self._goal_rf  if self._goal_rf is not None else [0.0, 0.0] # [x_lateral, depth] of the human in robot frame
-        dist = np.linalg.norm([x_lat, depth])
+        [x_lat, depth] = self._goal_rf
         heading = np.array([0.0, 1.0])
-        
+
         # P0: robot at origin
         p0 = np.array([0.0, 0.0])
         # P3: goal in BEV coords [x_lateral, depth]
         p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
 
-
         robot_path = self._extrapolate_robot_path_full(motion_vector, steps=steps)
+        if not robot_path:
+            logger.info("_get_best_traj: no robot_path, elapsed=%.3fs", time.time() - t_start)
+            return [], 0.0
 
         x_lats = np.arange(-traj_check_range, traj_check_range, step_size)
         depths = np.arange(-traj_check_range, traj_check_range, step_size)
         tangent_lengths = np.arange(0, tangent_range, step_size)
         best_curve = []
         best_score = 0.0
+        n_evaluated = 0
         for x in x_lats:
             for d in depths:
                 for l in tangent_lengths:
@@ -1147,10 +1151,13 @@ class SocialNavigator:
                     score, lowest_safety_val = self._trajectory_eval(curve)
 
                     traj_similarity = self._trajectory_similarity(curve, robot_path)
+                    n_evaluated += 1
                     if score > best_score and lowest_safety_val > minimum_allowed_safety and traj_similarity < traj_min_similarity:
                         best_curve = curve
                         best_score = score
 
+        elapsed = time.time() - t_start
+        logger.warning("_get_best_traj: evaluated %d curves in %.3fs", n_evaluated, elapsed)
         return best_curve, best_score
 
     def _trajectory_eval(self, curve):
