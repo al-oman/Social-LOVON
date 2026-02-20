@@ -1495,15 +1495,16 @@ class SocialNavigator:
         Returns:
             list of [x, y] points in robot frame
         """
-        horizon = self.params["horizon_s"]
-        steps = self.params["horizon_steps"]
-        if steps <= 0:
-            return []
-        dt = horizon / steps
+        # horizon = self.params["horizon_s"]
+        # steps = self.params["horizon_steps"]
+        # if steps <= 0:
+        #     return []
+        dt = 0.1
 
         curvature_alpha = 1.0 # maps x_lateral to curvature
         goal_distance_threshold = 0.1  # meters
-        [x_lat, depth] = self._goal_rf if self._goal_rf is not None else [None, None]
+        # [x_lat, depth] = self._goal_rf if self._goal_rf is not None else [None, None]
+        [x_lat, depth] = [0.25, 2.0]
         v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
         x, y, theta = 0.0, 0.0, 0.0
         path = []

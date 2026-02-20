@@ -721,6 +721,7 @@ class VisualLanguageController:
             # Extract target object from new instruction
             self.extracted_object = self.object_extractor.predict(new_instr)
             self.button_update_inst = True
+            self.state["mission_state_in"] = "running"
             print(f"Updated Mission Instruction: {self.mission_instruction_1}")
             self.update_ui_labels()  # Immediately update UI
 
