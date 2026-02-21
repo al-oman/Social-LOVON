@@ -391,7 +391,6 @@ class MotionControlThread(threading.Thread):
             synthetic = c.crowdnav_provider.step(mv)
             if synthetic is None:
                 print("CrowdNav episode finished.")
-                c._save_paths()
                 c.sim_started = False
                 return
 
@@ -429,6 +428,18 @@ class MotionControlThread(threading.Thread):
                         wx = robot_state.px + depth * cos_t + x_lat * sin_t
                         wy = robot_state.py + depth * sin_t - x_lat * cos_t
                         c._planned_trajectory_world.append((wx, wy))
+                    c.crowdnav_provider.planned_trajectory = c._planned_trajectory_world
+
+                    # Transform Bezier control points to world frame
+                    # cp_rf = c.social_nav._best_control_pts
+                    # if cp_rf is not None and c.social_nav.params["show_bezier_pts"]:
+                    #     cp_world = []
+                    #     for pt in cp_rf:
+                    #         x_lat, depth = float(pt[0]), float(pt[1])
+                    #         wx = robot_state.px + depth * cos_t + x_lat * sin_t
+                    #         wy = robot_state.py + depth * sin_t - x_lat * cos_t
+                    #         cp_world.append((wx, wy))
+                    #     c.crowdnav_provider.planned_control_pts = cp_world
 
     def stop(self):
         self.running = False
@@ -557,7 +568,8 @@ class VisualLanguageController:
 
         # Load social navigaton function
         sn_width = self.crowdnav_provider.image_width if self.crowdnav_sim_mode else args.image_width
-        sn_kwargs = {"image_width": sn_width}
+        sn_kwargs = {"image_width": sn_width,
+                     "show_bezier_pts": args.show_bezier_pts}
         if self.crowdnav_sim_mode:
             sn_kwargs["use_lidar_depth"] = True
             sn_kwargs["time_step"] = self.crowdnav_provider.time_step
@@ -567,6 +579,7 @@ class VisualLanguageController:
             sn_kwargs["lidar_cam_z_offset"] = 0.0
             sn_kwargs["lidar_cam_pitch_offset"] = 0.0
             sn_kwargs["lidar_cam_yaw_offset"] = 0.0
+            sn_kwargs["mono_k"] = self.crowdnav_provider._fx * 0.3  # match goal_size_m in _generate_synthetic_object_state
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
         # self.lidar_window = LidarWindowSide()
@@ -1322,6 +1335,8 @@ if __name__ == "__main__":
                 help='CrowdNav policy config file (crowdnav_sim_mode)')
     parser.add_argument('--robot_theta', type=float, default=None,
                 help='Initial robot heading in radians (crowdnav_sim_mode, default: pi/2)')
+    parser.add_argument('--show_bezier_pts', action='store_true', default=False,
+                help='Display Bezier control points on BEV and CrowdNav views')
     args = parser.parse_args()
 
     # Initialize and run controller

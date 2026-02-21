@@ -90,17 +90,19 @@ class SocialNavigator:
         "shield_thresh_on": 0.7,    # safety score below this → shield activates
         "shield_thresh_off": 0.8,   # safety score above this → shield deactivates (hysteresis)
         "shield_active_states": ["running"],  # mission states where shield is armed
-        "horizon_s": 5.0,
-        "horizon_steps": 25,
         "mono_k": 300.0,
         "correction_gain": 25.0,
-        "bezier_omega_gain": 10.0,     # scales omega_candidate from best-traj curvature; >1 = more aggressive
+        "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
+        # Robot pred
+        "horizon_s": 5.0,
+        "horizon_steps": 25,
+        "path_curvature": 0.45,       # tuned so that predicted robot trajectory matches real one  
         # --- Camera params  ---
         "image_width": 640,
         "image_height": 480,
         "fov_deg": 80.0,
         "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
-        # --- Trajectory prediction ---
+        # --- Human Trajectory prediction ---
         "pred_history": 25,
         "pred_steps": 60,
         "pred_interval": 1,    # predict every frame
@@ -131,6 +133,8 @@ class SocialNavigator:
         "lidar_cam_fov_scale": 1.0,    # multiplier on fov_deg for fine-tuning projection
         # --- Ghost humans (out-of-FOV persistence) ---
         "ghost_max_frames": 120,       # max frames a ghost persists (~30s at 4 Hz)
+        # --- Debug / visualisation ---
+        "show_bezier_pts": False,      # draw Bezier control points on BEV
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -178,6 +182,8 @@ class SocialNavigator:
         self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
         self._goal_rf = None               # [x_lateral, depth] estimated goal position
         self._best_traj = None             # best trajectory from _get_best_traj
+        self._best_control_pts = None      # (p0, p1, p2, p3) from _get_best_traj
+        self._best_traj_score = 0.0        # score from _get_best_traj
 
         # --- Diagnostics ---
         self.diag = {
@@ -281,7 +287,7 @@ class SocialNavigator:
         #     f"6={( t6-t5)*1e3:.1f}  7={( t7-t6)*1e3:.1f}  8={( t8-t7)*1e3:.1f}  "
         #     f"total={(t8-t0)*1e3:.1f}"
         # )
-        print(f"diag time: {t9-t8}")
+        # print(f"diag time: {t9-t8}")
 
         return modified_vector
 
@@ -1138,42 +1144,44 @@ class SocialNavigator:
         return omega_correction
 
     def _bezier_curve_correction(self, motion_vector):
-        best_curve, best_score = self._get_best_traj()
-        if not best_curve:
+        best_curve, best_score, best_control_pts = self._get_best_traj()
+        if not best_curve or best_control_pts is None:
             return 0.0
 
-        # Store for BEV visualisation.
+        # Store for BEV visualisation and to avoid redundant recomputation in _update_diagnostics.
         self._best_traj = best_curve
+        self._best_control_pts = best_control_pts
+        self._best_traj_score = best_score
 
-        # Infer the omega that would produce the best curve from its heading change.
-        pts = np.asarray(best_curve, dtype=np.float64)
-        first_seg = pts[1]  - pts[0]
-        last_seg  = pts[-1] - pts[-2]
-        theta_0 = math.atan2(float(first_seg[0]), float(first_seg[1]))
-        theta_f = math.atan2(float(last_seg[0]),  float(last_seg[1]))
-        delta_theta = (theta_f - theta_0 + math.pi) % (2 * math.pi) - math.pi
+        # Exact curvature at t=0 from the Bezier control points.
+        # For cubic Bezier B(t) with control points P0, P1, P2, P3:
+        #   B'(0)  = 3*(P1 - P0)
+        #   B''(0) = 6*(P0 - 2*P1 + P2)
+        #   kappa  = (dx'*dy'' - dy'*dx'') / (dx'^2 + dy'^2)^(3/2)
+        p0, p1, p2, p3 = best_control_pts
+        d1 = 3.0 * (p1 - p0)         # B'(0)
+        d2 = 6.0 * (p0 - 2*p1 + p2)  # B''(0)
 
-        # Traversal time from arc length + forward speed (not horizon_s, which
-        # is unrelated to the Bezier curve's geometry).
-        diffs = pts[1:] - pts[:-1]
-        arc_length = float(np.hypot(diffs[:, 0], diffs[:, 1]).sum())
+        speed_sq = d1[0]**2 + d1[1]**2
+        speed_cu = speed_sq * math.sqrt(speed_sq)
+        if speed_cu < 1e-9:
+            return 0.0
+
+        kappa_0 = (d1[0]*d2[1] - d1[1]*d2[0]) / speed_cu
+
         v_fwd = motion_vector[0]
-        traversal_time = arc_length / v_fwd if v_fwd > 0.01 else self.params["horizon_s"]
+        omega_desired = self.params["bezier_omega_gain"] * v_fwd * kappa_0
 
-        # Sign: positive omega = turn left = negative x in robot frame.
-        # atan2(dx, dy) gives positive angle for rightward dx, which is opposite
-        # to the unicycle convention, so negate.
-        omega_candidate = self.params["bezier_omega_gain"] * delta_theta / traversal_time
-
-        return omega_candidate - motion_vector[2]
+        return omega_desired - motion_vector[2]
 
     def _get_best_traj(self):
         """
         Compute angular correction to steer away from a specific human using a Bezier curve approach.
         This is a placeholder for a more advanced correction method that considers the predicted path of the human.
         """
+        print('traj called')
         if self._goal_rf is None:
-            return [], 0.0
+            return [], 0.0, None
 
         t_start = time.time()
 
@@ -1181,8 +1189,6 @@ class SocialNavigator:
         step_size = 0.25 # m (coarse grid for now)
 
         steps = 20 # number of arc segments
-        # minimum_allowed_safety = 0.1 #
-        # traj_min_similarity = 1.0 #
 
         [x_lat, depth] = self._goal_rf
         heading = np.array([0.0, 1.0])
@@ -1191,11 +1197,6 @@ class SocialNavigator:
         p0 = np.array([0.0, 0.0])
         # P3: goal in BEV coords [x_lateral, depth]
         p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
-
-        # robot_path = self._extrapolate_robot_path_full(motion_vector, steps=steps)
-        # if not robot_path:
-        #     logger.info("_get_best_traj: no robot_path, elapsed=%.3fs", time.time() - t_start)
-        #     return [], 0.0
 
         # Pre-extract human data once for the whole batch.
         _human_positions = [
@@ -1213,10 +1214,11 @@ class SocialNavigator:
         best_curve = []
         best_score = -1.0
         best_lowest_safety = 0.0
+        best_control_pts = None
         n_evaluated = 0
         best_similarity = 0.0
         for x_offset in x_offsets:
-            curve = self._construct_bezier(x_offset, steps=steps)
+            curve, control_pts = self._construct_bezier(x_offset, steps=steps)
             score, lowest_safety_val = self._trajectory_eval_v2(
                 curve, _human_positions, _human_predicted_paths)
 
@@ -1228,12 +1230,60 @@ class SocialNavigator:
                 best_score = score
                 best_lowest_safety = lowest_safety_val
                 best_similarity = traj_similarity
+                best_control_pts = control_pts
         elapsed = time.time() - t_start
         logger.warning(
             "_get_best_traj: %d curves in %.3fs  best_score=%.3f  lowest_safety=%.3f best_similarity=%.3f",
             n_evaluated, elapsed, best_score, best_lowest_safety, best_similarity
         )
-        return best_curve, best_score
+        return best_curve, best_score, best_control_pts
+
+    def _get_best_traj_v2(self):
+        """
+        Compute angular correction to steer away from a specific human using a Bezier curve approach.
+        This is a placeholder for a more advanced correction method that considers the predicted path of the human.
+        """
+        if self._goal_rf is None:
+            return [], 0.0, None
+
+        steps = 20 # number of arc segments
+
+        [x_lat, depth] = self._goal_rf
+        heading = np.array([0.0, 1.0])
+
+        # Pre-extract human data once for the whole batch.
+        _human_positions = [
+            tuple(h.position_rf)
+            for h in self._tracked_humans.values()
+            if h.position_rf is not None
+        ]
+        _human_predicted_paths = {
+            h.track_id: h.predicted_path
+            for h in self._tracked_humans.values()
+            if h.predicted_path
+        }
+
+        offsets = np.arange(-1, 1+0.1, 0.1)
+        for offset in offsets:
+            curve, control_pts = self._construct_trajectory(offset)
+            score, lowest_safety_val = self._trajectory_eval_v2(
+                curve, _human_positions, _human_predicted_paths)
+
+            traj_similarity = self._trajectory_similarity_v2(curve)
+
+            n_evaluated += 1
+            if score > best_score:
+                best_curve = curve
+                best_score = score
+                best_lowest_safety = lowest_safety_val
+                best_similarity = traj_similarity
+                best_control_pts = control_pts
+        elapsed = time.time() - t_start
+        logger.warning(
+            "_get_best_traj: %d curves in %.3fs  best_score=%.3f  lowest_safety=%.3f best_similarity=%.3f",
+            n_evaluated, elapsed, best_score, best_lowest_safety, best_similarity
+        )
+        return best_curve, best_score, best_control_pts  
 
     def _trajectory_eval(self, curve):
         trajectory_score = 0.0
@@ -1395,21 +1445,33 @@ class SocialNavigator:
                 self.safety_score, self.shield_active,
             )
         motion = self._motion_original or [0, 0, 0]
-        try:
-            traj = self._extrapolate_robot_path_full(motion)
-            traj_score, lowest_safety = self._trajectory_eval(traj)
-            self.diag["traj_score"] = traj_score
 
-            if self._goal_rf is not None:
-                best_traj, best_score = self._get_best_traj()
-                self.diag["best_traj_score"] = best_score
-                self._best_traj = best_traj if best_traj else (traj if traj else None)
-            else:
-                print("no valid goal")
-                self.diag["best_traj_score"] = traj_score
-                self._best_traj = traj if traj else None
-        except Exception as e:
-            logger.error("_update_diagnostics traj eval FAILED: %s", e, exc_info=True)
+        # --- Trajectory score (informational) ---
+        # try:
+        #     traj = self._extrapolate_robot_path_full(motion)
+        #     traj_score, lowest_safety = self._trajectory_eval(traj)
+        #     self.diag["traj_score"] = traj_score
+        # except Exception as e:
+        #     logger.error("_update_diagnostics traj eval FAILED: %s", e, exc_info=True)
+        #     traj = None
+
+        # --- Best trajectory (always refresh when goal is known) ---
+        # if self._goal_rf is not None:
+        #     if not (self.shield_active and self._best_traj):
+        #         try:
+        #             best_traj, best_score, best_cp = self._get_best_traj()
+        #             self._best_traj = best_traj if best_traj else (traj if traj else None)
+        #             self._best_control_pts = best_cp
+        #             self._best_traj_score = best_score
+        #             self.diag["best_traj_score"] = best_score
+        #         except Exception as e:
+        #             logger.error("_update_diagnostics _get_best_traj FAILED: %s", e, exc_info=True)
+        #     else:
+        #         self.diag["best_traj_score"] = self._best_traj_score
+        # else:
+        #     self.diag["best_traj_score"] = self.diag.get("traj_score", 0.0)
+        #     self._best_traj = traj if traj else None
+        #     self._best_control_pts = None
 
 
     # ================================================================== #
@@ -1434,11 +1496,13 @@ class SocialNavigator:
 
         # Safety heatmap underlay
         if show_heatmap:
+            t0 = time.perf_counter()
             self.grid, extent = self.get_safety_heatmap(
                 xlim=(-bev_range / 2, bev_range / 2),
                 ylim=(0, bev_range),
                 resolution=bev_range / 50,
             )
+            t1 = time.perf_counter()
             if self.grid is not None:
                 if not hasattr(self, '_bev_cmap'):
                     import matplotlib
@@ -1613,6 +1677,24 @@ class SocialNavigator:
         else:
             logger.info("self.best_traj is None")
 
+        # # Bezier control points (white dots + dashed control polygon)
+        # if self.params["show_bezier_pts"] and self._best_control_pts is not None:
+        #     cp_px = []
+        #     for pt in self._best_control_pts:
+        #         cx_ = int(rcx + pt[0] * scale)
+        #         cy_ = int(rcy - pt[1] * scale)
+        #         cp_px.append((cx_, cy_))
+        #     # Control polygon (thin dashed-ish white lines)
+        #     for i in range(len(cp_px) - 1):
+        #         _cv2.line(bev, cp_px[i], cp_px[i + 1], (255, 255, 255), 1, _cv2.LINE_AA)
+        #     # Control points as circles with labels
+        #     labels = ["P0", "P1", "P2", "P3"]
+        #     for i, (cx_, cy_) in enumerate(cp_px):
+        #         if 0 <= cx_ < sz and 0 <= cy_ < sz:
+        #             _cv2.circle(bev, (cx_, cy_), 5, (255, 255, 255), -1)
+        #             _cv2.putText(bev, labels[i], (cx_ + 7, cy_ - 5),
+        #                          _cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
         # Correction arrow: original tip -> corrected tip (magenta)
         if self.shield_active and "original" in path_tips and "corrected" in path_tips:
             o_tip = path_tips["original"]
@@ -1623,10 +1705,13 @@ class SocialNavigator:
 
         # Legend
         lx, ly = 10, sz - 75
-        for label, color in [("Original", (255, 255, 0)),
-                              ("Corrected", (0, 255, 255)),
-                              ("Best Traj", (0, 255, 0)),
-                              ("Correction", (255, 0, 255))]:
+        legend_items = [("Original", (255, 255, 0)),
+                        ("Corrected", (0, 255, 255)),
+                        ("Best Traj", (0, 255, 0)),
+                        ("Correction", (255, 0, 255))]
+        # if self.params["show_bezier_pts"]:
+        #     legend_items.append(("Ctrl Pts", (255, 255, 255)))
+        for label, color in legend_items:
             _cv2.line(bev, (lx, ly), (lx + 20, ly), color, 2, _cv2.LINE_AA)
             _cv2.putText(bev, label, (lx + 25, ly + 4),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
@@ -1795,6 +1880,13 @@ class SocialNavigator:
             path.append([x, y])
         return path
 
+    def _extrapolate_robot_trajectory(self, motion_vector):
+        """
+        used to predict the robot's future trajectory using euler spiral
+        ie: linearly decreasing curvature
+        """
+        pass
+
     def _extrapolate_robot_path_full(self, motion_vector, steps=50):
         """
         Cubic Bezier curve from robot to goal.
@@ -1834,19 +1926,17 @@ class SocialNavigator:
         heading = np.array([0.0, 1.0])
 
         # P1: extend along initial heading (controls departure curvature)
-        tangent_len = curvature * goal_dist / 3.0
+        tangent_len = curvature * goal_dist / 2.0
         p1 = p0 + heading * tangent_len
+        p1p3 = p1 - p3
+        # P2: pull back from goal along direction from p1
+        p2 = p3 + p1p3*(1/3)
 
-        # P2: pull back from goal along goal direction (smooth straight arrival)
-        goal_dir = p3 / goal_dist
-        p2 = p3 - goal_dir * (goal_dist / 3.0)
-
-        # Evaluate cubic Bezier
         return self._bezier(p0, p1, p2, p3, steps=steps)
     
     def _construct_bezier(self, x_offset, steps=50):
         if self._goal_rf is None:
-            return []
+            return [], None
 
         # P3: goal in BEV coords [x_lateral, depth]
         x_lat, depth = self._goal_rf[0], self._goal_rf[1]
@@ -1854,18 +1944,22 @@ class SocialNavigator:
 
         goal_dist = np.linalg.norm(p3)
         if goal_dist < 0.05:
-            return []
+            return [], None
 
         curvature = self.params.get("path_curvature", 0.5)
 
         # Robot heading is always forward in robot frame
         heading = np.array([0.0, 1.0])
         p0 = np.array([0.0, 0.0])
-        p1 = p0 + heading * curvature * goal_dist /3 
+        p1 = p0 + heading * curvature * goal_dist /3
         p2 = p1 + np.array([x_offset, depth * (1/5)])
 
         # Evaluate cubic Bezier
-        return self._bezier(p0, p1, p2, p3, steps=steps)
+        curve_points = self._bezier(p0, p1, p2, p3, steps=steps)
+        return curve_points, (p0, p1, p2, p3)
+
+    def _construct_trajectory(self, offset):
+        pass
 
     def _bezier(self, p0, p1, p2, p3, steps=50):
         """

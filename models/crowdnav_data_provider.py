@@ -67,6 +67,8 @@ class CrowdNavDataProvider:
         self.ob = None
         self.done = False
         self._robot_trajectory = []  # list of (px, py) for rendering
+        self.planned_trajectory = None  # list of (wx, wy) set from deploy.py
+        self.planned_control_pts = None  # list of (wx, wy) Bezier control points
 
     # ------------------------------------------------------------------
     #  Episode control
@@ -78,6 +80,8 @@ class CrowdNavDataProvider:
             self.robot.theta = robot_theta
         self.done = False
         self._robot_trajectory = []
+        self.planned_trajectory = None
+        self.planned_control_pts = None
         return self.ob
 
     # ------------------------------------------------------------------
@@ -306,10 +310,28 @@ class CrowdNavDataProvider:
                             fill=False, color=cmap(i))
             ax.add_artist(hc)
 
-        # Robot trajectory
+        # Planned Bezier trajectory (dashed green)
+        if self.planned_trajectory is not None and len(self.planned_trajectory) > 1:
+            plan = np.array(self.planned_trajectory)
+            ax.plot(plan[:, 0], plan[:, 1], color='green', linestyle='--',
+                    linewidth=1.5, alpha=0.7, label='planned')
+
+        # Bezier control points (white dots + control polygon)
+        if self.planned_control_pts is not None and len(self.planned_control_pts) == 4:
+            cp = np.array(self.planned_control_pts)
+            ax.plot(cp[:, 0], cp[:, 1], 'w--', linewidth=1.0, alpha=0.6)
+            labels = ["P0", "P1", "P2", "P3"]
+            for i, (cx_, cy_) in enumerate(cp):
+                ax.plot(cx_, cy_, 'wo', markersize=6, markeredgecolor='black',
+                        markeredgewidth=0.5)
+                ax.annotate(labels[i], (cx_, cy_), textcoords="offset points",
+                            xytext=(5, 5), fontsize=7, color='white')
+
+        # Robot trajectory (solid blue)
         if len(self._robot_trajectory) > 1:
             traj = np.array(self._robot_trajectory)
-            ax.plot(traj[:, 0], traj[:, 1], 'b-', linewidth=1.5, alpha=0.7)
+            ax.plot(traj[:, 0], traj[:, 1], 'b-', linewidth=1.5, alpha=0.7,
+                    label='actual')
 
         # Robot
         s = self.robot.get_full_state()
