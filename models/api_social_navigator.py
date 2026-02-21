@@ -181,6 +181,8 @@ class SocialNavigator:
         self._robot_predicted_path = None  # list of [x, y] in robot frame
         self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
         self._goal_rf = None               # [x_lateral, depth] estimated goal position
+        self._current_traj = None            # extrapolated robot path
+        self._current_traj_score = 0.0     # score of current extrapolated path
         self._best_traj = None             # best trajectory from _get_best_traj
         self._best_control_pts = None      # (p0, p1, p2, p3) from _get_best_traj
         self._best_traj_score = 0.0        # score from _get_best_traj
@@ -261,117 +263,34 @@ class SocialNavigator:
         self.safety_score = self._compute_safety_score()
         t5 = time.perf_counter()
 
+        self.get_safety_heatmap2()
+
         # 6. Shield gate -- decide whether to intervene
         self.shield_active = self._evaluate_shield(mission_state)
         t6 = time.perf_counter()
 
+        # Store original motion before correction (needed by trajectory computation)
+        self._motion_original = list(motion_vector)
+        t8 = time.perf_counter()
+        # 6.5 Compute trajectory data (feeds both correction + diagnostics)
+        self._update_trajectory_data()
+        t9 = time.perf_counter()
         # 7. Command correction (only when shield is active)
         modified_vector = self._correct_command(motion_vector)
-        t7 = time.perf_counter()
+        t10 = time.perf_counter()
 
-        # Store both for BEV visualisation
-        self._motion_original = list(motion_vector)
+        # Store modulated for BEV visualisation
         self._motion_modulated = list(modified_vector)
 
         # Store executed velocity for ego-motion compensation next frame
         self._ego_velocity = list(modified_vector)
 
-        # 8. Update diagnostics
-        t8 = time.perf_counter()
+        # 8. Update diagnostics (read-only — just populates self.diag)
         self._update_diagnostics()
-        t9 = time.perf_counter()
-
-        # print(
-        #     f"step stages (ms)  1={( t1-t0)*1e3:.1f}  2={( t2-t1)*1e3:.1f}  "
-        #     f"3={( t3-t2)*1e3:.1f}  4={( t4-t3)*1e3:.1f}  5={( t5-t4)*1e3:.1f}  "
-        #     f"6={( t6-t5)*1e3:.1f}  7={( t7-t6)*1e3:.1f}  8={( t8-t7)*1e3:.1f}  "
-        #     f"total={(t8-t0)*1e3:.1f}"
-        # )
-        # print(f"diag time: {t9-t8}")
+        t11 = time.perf_counter()
 
         return modified_vector
 
-    # def step_ground_truth(self, motion_vector, gt_humans, mission_state):
-    #     """
-    #     Entry point for ground-truth human data (e.g. from CrowdNav simulator).
-
-    #     Bypasses perception stages 1-3 (detection, distance estimation, tracking)
-    #     and directly populates _tracked_humans from pre-computed robot-frame data.
-    #     Then runs stages 4-8 as normal.
-
-    #     Args:
-    #         motion_vector: [v_x, v_y, omega_z] from L2MM
-    #         gt_humans:     list of dicts, each with keys:
-    #                          track_id:     int
-    #                          position_rf:  [x_lateral, depth] in robot frame
-    #                          distance:     float meters
-    #                          velocity:     [vx_lateral, v_depth] in robot frame
-    #                          radius:       float meters
-    #         mission_state: str, current state machine state
-
-    #     Returns:
-    #         motion_vector: [v_x, v_y, omega_z] (possibly corrected)
-    #     """
-    #     if not self.enabled:
-    #         return motion_vector
-
-    #     self._frame_count += 1
-    #     self._lidar_ranges = None
-
-    #     t0 = time.perf_counter()
-    #     print(60*"=")
-    #     # --- Directly populate _tracked_humans (bypass stages 1-3) ---
-    #     self._tracked_humans.clear()
-    #     for gh in gt_humans:
-    #         tid = gh["track_id"]
-    #         human = TrackedHuman(track_id=tid)
-    #         human.position_rf = gh["position_rf"]
-    #         human.distance = gh["distance"]
-    #         human.velocity = gh.get("velocity")
-    #         human.confidence = 1.0
-    #         human.last_seen = time.time()
-    #         self._tracked_humans[tid] = human
-
-    #     # --- Cache robot predicted path for safety scoring + BEV ---
-    #     self._robot_predicted_path = self._extrapolate_robot_path(motion_vector)
-
-    #     t1 = time.perf_counter()
-
-    #     # 4. Predict future trajectories
-    #     self._predict_trajectories()
-    #     t2 = time.perf_counter()
-
-    #     # 5. Compute safety score
-    #     self.safety_score = self._compute_safety_score()
-    #     t3 = time.perf_counter()
-
-    #     # 6. Shield gate
-    #     self.shield_active = self._evaluate_shield(mission_state)
-    #     t4 = time.perf_counter()
-
-    #     # 7. Command correction
-    #     modified_vector = self._correct_command(motion_vector)
-    #     t5 = time.perf_counter()
-
-    #     # Store both for BEV visualisation
-    #     self._motion_original = list(motion_vector)
-    #     self._motion_modulated = list(modified_vector)
-
-    #     # Store executed velocity for ego-motion compensation next frame
-    #     self._ego_velocity = list(modified_vector)
-
-    #     # 8. Update diagnostics
-    #     self._update_diagnostics()
-    #     t6 = time.perf_counter()
-
-    #     print(
-    #         f"step_gt stages (ms)  1-3bypass={( t1-t0)*1e3:.1f}  "
-    #         f"4={( t2-t1)*1e3:.1f}  5={( t3-t2)*1e3:.1f}  "
-    #         f"6={( t4-t3)*1e3:.1f}  7={( t5-t4)*1e3:.1f}  "
-    #         f"8={( t6-t5)*1e3:.1f}  total={(t6-t0)*1e3:.1f}"
-    #     )
-
-    #     return modified_vector
 
     # ================================================================== #
     #  STAGE 1 -- Parse pose_state into detection dicts                   #
@@ -1104,12 +1023,12 @@ class SocialNavigator:
         threat = 1.0 - self.safety_score          # 0 = safe, 1 = dangerous
 
         # Ensure safety grid is computed for potential field correction
-        bev_range = self.params["bev_range_m"]
-        self.grid, _ = self.get_safety_heatmap(
-            xlim=(-bev_range / 2, bev_range / 2),
-            ylim=(0, bev_range),
-            resolution=bev_range / 50,
-        )
+        # bev_range = self.params["bev_range_m"]
+        # self.grid, _ = self.get_safety_heatmap(
+        #     xlim=(-bev_range / 2, bev_range / 2),
+        #     ylim=(0, bev_range),
+        #     resolution=bev_range / 50,
+        # )
 
         omega_correction = self._bezier_curve_correction(motion_vector)
         vx_corrected = vx
@@ -1144,21 +1063,15 @@ class SocialNavigator:
         return omega_correction
 
     def _bezier_curve_correction(self, motion_vector):
-        best_curve, best_score, best_control_pts = self._get_best_traj()
-        if not best_curve or best_control_pts is None:
+        if not self._best_traj or self._best_control_pts is None:
             return 0.0
-
-        # Store for BEV visualisation and to avoid redundant recomputation in _update_diagnostics.
-        self._best_traj = best_curve
-        self._best_control_pts = best_control_pts
-        self._best_traj_score = best_score
 
         # Exact curvature at t=0 from the Bezier control points.
         # For cubic Bezier B(t) with control points P0, P1, P2, P3:
         #   B'(0)  = 3*(P1 - P0)
         #   B''(0) = 6*(P0 - 2*P1 + P2)
         #   kappa  = (dx'*dy'' - dy'*dx'') / (dx'^2 + dy'^2)^(3/2)
-        p0, p1, p2, p3 = best_control_pts
+        p0, p1, p2, p3 = self._best_control_pts
         d1 = 3.0 * (p1 - p0)         # B'(0)
         d2 = 6.0 * (p0 - 2*p1 + p2)  # B''(0)
 
@@ -1424,7 +1337,37 @@ class SocialNavigator:
         u_px = object_xyn[0] * self.params["image_width"]
         self._goal_rf = [depth * (u_px - self._cx) / self._fx, depth]
 
+    def _update_trajectory_data(self):
+        """Compute current-path score and best trajectory. Called once per step()."""
+        motion = self._motion_original or [0, 0, 0]
+
+        # --- Score the robot's current extrapolated path ---
+        try:
+            traj = self._extrapolate_robot_path_full(motion)
+            traj_score, lowest_safety = self._trajectory_eval(traj)
+            self._current_traj = traj
+            self._current_traj_score = traj_score
+        except Exception as e:
+            logger.error("_update_trajectory_data traj eval FAILED: %s", e, exc_info=True)
+            self._current_traj = None
+            self._current_traj_score = 0.0
+
+        # --- Find best trajectory (always refresh when goal is known) ---
+        if self._goal_rf is not None:
+            try:
+                best_traj, best_score, best_cp = self._get_best_traj()
+                self._best_traj = best_traj if best_traj else (self._current_traj or None)
+                self._best_control_pts = best_cp
+                self._best_traj_score = best_score
+            except Exception as e:
+                logger.error("_update_trajectory_data _get_best_traj FAILED: %s", e, exc_info=True)
+        else:
+            self._best_traj = self._current_traj
+            self._best_control_pts = None
+            self._best_traj_score = self._current_traj_score
+
     def _update_diagnostics(self):
+        """Read-only: copy previously stored values into self.diag."""
         distances = [
             h.distance for h in self._tracked_humans.values()
             if h.distance is not None
@@ -1434,8 +1377,8 @@ class SocialNavigator:
             "min_distance": min(distances) if distances else None,
             "safety_score": self.safety_score,
             "shield_active": self.shield_active,
-            "traj_score": 0.0,
-            "best_traj_score": 0.0,
+            "traj_score": getattr(self, '_current_traj_score', 0.0),
+            "best_traj_score": getattr(self, '_best_traj_score', 0.0),
         }
         if self._tracked_humans:
             logger.info(
@@ -1444,34 +1387,6 @@ class SocialNavigator:
                 "{:.2f}m".format(self.diag["min_distance"]) if self.diag["min_distance"] else "n/a",
                 self.safety_score, self.shield_active,
             )
-        motion = self._motion_original or [0, 0, 0]
-
-        # --- Trajectory score (informational) ---
-        # try:
-        #     traj = self._extrapolate_robot_path_full(motion)
-        #     traj_score, lowest_safety = self._trajectory_eval(traj)
-        #     self.diag["traj_score"] = traj_score
-        # except Exception as e:
-        #     logger.error("_update_diagnostics traj eval FAILED: %s", e, exc_info=True)
-        #     traj = None
-
-        # --- Best trajectory (always refresh when goal is known) ---
-        # if self._goal_rf is not None:
-        #     if not (self.shield_active and self._best_traj):
-        #         try:
-        #             best_traj, best_score, best_cp = self._get_best_traj()
-        #             self._best_traj = best_traj if best_traj else (traj if traj else None)
-        #             self._best_control_pts = best_cp
-        #             self._best_traj_score = best_score
-        #             self.diag["best_traj_score"] = best_score
-        #         except Exception as e:
-        #             logger.error("_update_diagnostics _get_best_traj FAILED: %s", e, exc_info=True)
-        #     else:
-        #         self.diag["best_traj_score"] = self._best_traj_score
-        # else:
-        #     self.diag["best_traj_score"] = self.diag.get("traj_score", 0.0)
-        #     self._best_traj = traj if traj else None
-        #     self._best_control_pts = None
 
 
     # ================================================================== #
@@ -1497,11 +1412,11 @@ class SocialNavigator:
         # Safety heatmap underlay
         if show_heatmap:
             t0 = time.perf_counter()
-            self.grid, extent = self.get_safety_heatmap(
-                xlim=(-bev_range / 2, bev_range / 2),
-                ylim=(0, bev_range),
-                resolution=bev_range / 50,
-            )
+            # self.grid, extent = self.get_safety_heatmap(
+            #     xlim=(-bev_range / 2, bev_range / 2),
+            #     ylim=(0, bev_range),
+            #     resolution=bev_range / 50,
+            # )
             t1 = time.perf_counter()
             if self.grid is not None:
                 if not hasattr(self, '_bev_cmap'):
@@ -1826,6 +1741,56 @@ class SocialNavigator:
             extent:      [xmin, xmax, ymin, ymax] for imshow
             Returns (None, None) if no humans are tracked.
         """
+        human_positions = [
+            tuple(h.position_rf)
+            for h in self._tracked_humans.values()
+            if h.position_rf is not None
+        ]
+        if not human_positions:
+            # No humans — return uniform safe grid
+            x = np.arange(xlim[0], xlim[1], resolution)
+            y = np.arange(ylim[0], ylim[1], resolution)
+            return np.ones((len(y), len(x))), [xlim[0], xlim[1], ylim[0], ylim[1]]
+
+        human_predicted_paths = {
+            h.track_id: h.predicted_path
+            for h in self._tracked_humans.values()
+            if h.predicted_path
+        }
+
+        self.grid, extent = compute_safety_grid(
+            human_positions, xlim, ylim,
+            resolution=resolution,
+            human_predicted_paths=human_predicted_paths or None,
+        )
+        return self.grid, extent
+    
+    def get_safety_heatmap2(self, xlim=(-5, 5), ylim=(-5, 5), resolution=0.2):
+        """
+        Compute a 2D safety heatmap from the currently tracked humans.
+
+        Works identically for both paths:
+          - deploy:  _tracked_humans filled by step()  (perception)
+          - sim:     _tracked_humans filled by step_ground_truth()
+
+        All coordinates are in robot frame (robot at origin).
+
+        Args:
+            xlim: (xmin, xmax) lateral bounds in meters
+            ylim: (ymin, ymax) depth bounds in meters
+            resolution: grid cell size in meters
+
+        Returns:
+            safety_grid: 2D numpy array, values in [0, 1]
+            extent:      [xmin, xmax, ymin, ymax] for imshow
+            Returns (None, None) if no humans are tracked.
+        """
+
+        bev_range = self.params["bev_range_m"]
+        xlim=(-bev_range / 2, bev_range / 2)
+        ylim=(0, bev_range)
+        resolution=bev_range / 50
+            
         human_positions = [
             tuple(h.position_rf)
             for h in self._tracked_humans.values()
