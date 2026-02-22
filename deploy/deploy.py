@@ -386,6 +386,10 @@ class MotionControlThread(threading.Thread):
             time.sleep(0.05)
             return
 
+        if getattr(c, 'sim_paused', False):
+            time.sleep(0.05)
+            return
+
         with c.motion_lock:
             mv = c.motion_vector if hasattr(c, 'motion_vector') else [0.0, 0.0, 0.0]
             synthetic = c.crowdnav_provider.step(mv)
@@ -552,6 +556,7 @@ class VisualLanguageController:
             self.crowdnav_provider.init_render()
             self.motion_vector = [0.0, 0.0, 0.0]
             self.sim_started = False
+            self.sim_paused = False
             self._planned_trajectory_world = None  # captured on first goal detection
             self.crowdnav_sim_frame = self.crowdnav_provider.render_frame()
 
@@ -651,13 +656,18 @@ class VisualLanguageController:
             sim_control_frame.pack(pady=5, padx=10, anchor='n')
             Button(sim_control_frame, text="Start Sim",
                    command=self._start_sim,
-                   font=self.font_style, width=12).pack(side='left', padx=5)
+                   font=self.font_style, width=12).pack(pady=5)
             Button(sim_control_frame, text="Reset Sim",
                    command=self._reset_sim,
-                   font=self.font_style, width=12).pack(side='left', padx=5)
+                   font=self.font_style, width=12).pack(pady=5)
             Button(sim_control_frame, text="Save Paths",
                    command=self._save_paths,
-                   font=self.font_style, width=12).pack(side='left', padx=5)
+                   font=self.font_style, width=12).pack(pady=5)
+
+            self.pause_button = Button(sim_control_frame, text="Pause",
+                   command=self._toggle_pause,
+                   font=self.font_style, width=12)
+            self.pause_button.pack(pady=5)
 
         # Mission instruction input area
         initial_instructions = [
@@ -783,6 +793,7 @@ class VisualLanguageController:
     def _reset_sim(self):
         """Reset the CrowdNav simulation for a new trial."""
         self.sim_started = False
+        self.sim_paused = False
         with self.motion_lock:
             self.crowdnav_provider.reset(robot_theta=self.robot_theta)
             self.motion_vector = [0.0, 0.0, 0.0]
@@ -793,7 +804,22 @@ class VisualLanguageController:
             self.social_nav._ego_velocity = None
             self.social_nav._frame_count = 0
             self.crowdnav_sim_frame = self.crowdnav_provider.render_frame()
+        self.pause_button.config(text="Pause")
         print("Simulation reset. Press Start to begin.")
+
+    def _toggle_pause(self):
+        """Toggle pause state of the simulation."""
+        if not self.sim_started:
+            print("Simulation not started. Click Start Sim first.")
+            return
+
+        self.sim_paused = not self.sim_paused
+        if self.sim_paused:
+            self.pause_button.config(text="Resume")
+            print("Simulation paused.")
+        else:
+            self.pause_button.config(text="Pause")
+            print("Simulation resumed.")
 
     def _save_paths(self):
         """Save planned Bezier trajectory and actual robot path to a timestamped txt file."""

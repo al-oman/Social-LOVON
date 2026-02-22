@@ -133,7 +133,7 @@ class SocialNavigator:
         "lidar_cam_z_offset": 0.05,    # meters, camera height above lidar (positive = camera higher)
         "lidar_cam_fov_scale": 1.0,    # multiplier on fov_deg for fine-tuning projection
         # --- Ghost humans (out-of-FOV persistence) ---
-        "ghost_max_frames": 120,       # max frames a ghost persists (~30s at 4 Hz)
+        "ghost_max_frames": 200,       # max frames a ghost persists (~30s at 4 Hz)
         # --- Debug / visualisation ---
         "show_bezier_pts": False,      # draw Bezier control points on BEV
         # --- Elastic band trajectory ---
@@ -1429,7 +1429,7 @@ class SocialNavigator:
         has_humans = bool(self._tracked_humans)
         _lidar_z_min = _lidar_z_max = None
 
-        # Safety heatmap underlay
+        # -------------------Safety heatmap underlay-------------------
         if show_heatmap:
             t0 = time.perf_counter()
             # self.grid, extent = self.get_safety_heatmap(
@@ -1450,25 +1450,37 @@ class SocialNavigator:
                 hm_bgr = _cv2.flip(hm_bgr, 0)
                 bev[pad:pad+inner, pad:pad+inner] = hm_bgr
 
-                # Shield-threshold contour
-                thresh = self.params["shield_thresh_on"]
-                binary = (self.grid < thresh).astype(np.uint8) * 255
-                binary = _cv2.resize(binary, (inner, inner),
+                # Shield-threshold "ON" contour
+                thresh_on = self.params["shield_thresh_on"]
+                binary_on = (self.grid < thresh_on).astype(np.uint8) * 255
+                binary_on = _cv2.resize(binary_on, (inner, inner),
                                      interpolation=_cv2.INTER_NEAREST)
-                binary = _cv2.flip(binary, 0)
+                binary_on = _cv2.flip(binary_on, 0)
                 contours, _ = _cv2.findContours(
-                    binary, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+                    binary_on, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
                 for cnt in contours:
                     cnt += np.array([[[pad, pad]]])
                 _cv2.drawContours(bev, contours, -1, (0, 0, 0), 1)
 
-        _cv2.rectangle(bev, (0, 0), (sz - 1, sz - 1), (255, 255, 255), 1)
+                # Shield-threshold "OFF" contour
+                thresh_off = self.params["shield_thresh_off"]
+                binary_off = (self.grid < thresh_off).astype(np.uint8) * 255
+                binary_off = _cv2.resize(binary_off, (inner, inner),
+                                     interpolation=_cv2.INTER_NEAREST)
+                binary_off = _cv2.flip(binary_off, 0)
+                contours, _ = _cv2.findContours(
+                    binary_off, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    cnt += np.array([[[pad, pad]]])
+                _cv2.drawContours(bev, contours, -1, (0, 0, 0), 1)
+
+        _cv2.rectangle(bev, (0, 0), (sz - 1, sz - 1), (127, 127, 127), 1)
 
         # Robot at bottom-center
         rcx = sz // 2
         rcy = sz - pad
 
-        # Camera FOV lines
+        # -------------------Camera FOV lines-------------------
         half_fov = np.radians(self.params["fov_deg"] / 2.0)
         fov_len = int(bev_range * scale)
         for sign in (-1, 1):
@@ -1476,7 +1488,7 @@ class SocialNavigator:
             ey = int(rcy - fov_len * np.cos(half_fov))
             _cv2.line(bev, (rcx, rcy), (ex, ey), (100, 100, 100), 1, _cv2.LINE_AA)
 
-        # Range-ring semicircles
+        # -------------------Range-ring semicircles-------------------
         for r_m in np.arange(1.0, bev_range + 0.01, 1.0):
             r_px = int(r_m * scale)
             _cv2.ellipse(bev, (rcx, rcy), (r_px, r_px), 0, 180, 360,
@@ -1485,7 +1497,7 @@ class SocialNavigator:
                          (rcx + 3, rcy - r_px + 5),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
 
-        # LiDAR point cloud
+        # -------------------LiDAR point cloud-------------------
         if has_lidar:
             lx = self._lidar_ranges.get("x")
             ly = self._lidar_ranges.get("y")
@@ -1526,7 +1538,7 @@ class SocialNavigator:
                                         tuple(int(c) for c in _col), -1)
                         _lidar_z_min, _lidar_z_max = z_min, z_max
 
-        # LiDAR Z-height colorbar legend
+        # -------------------LiDAR Z-height colorbar legend-------------------
         if has_lidar and _lidar_z_min is not None:
             cb_x = sz - 30          # right edge
             cb_y0, cb_y1 = pad, sz - pad
@@ -1543,7 +1555,7 @@ class SocialNavigator:
             _cv2.putText(bev, "Z", (cb_x + 2, cb_y0 - 5),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
 
-        # Robot marker
+        # -------------------Robot marker-------------------
         _cv2.drawMarker(bev, (rcx, rcy), (0, 255, 0),
                         _cv2.MARKER_TRIANGLE_UP, 24, 2)
 
@@ -1557,7 +1569,7 @@ class SocialNavigator:
         _cv2.putText(bev, f"Bird's Eye View  [{count_str} human{'s' if (n_observed + n_ghosts) != 1 else ''}]",
                      (10, 25), _cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
-        # Robot motion-vector curves
+        # -------------------Robot motion-vector curves-------------------
         path_tips = {}  # key: "original" or "corrected" -> (px, py)
         for vec, color, key in [
             (self._motion_original,  (255, 255, 0),  "original"),
@@ -1578,7 +1590,7 @@ class SocialNavigator:
                 tip = prev
             path_tips[key] = tip
 
-        # Full Robot trajectory curves
+        # -------------------Full Robot trajectory curves-------------------
         traj_tips = {}  # key: "original" or "corrected" -> (px, py)
         for vec, color, key in [
             (self._motion_original,  (255, 255, 0),  "original")
@@ -1599,7 +1611,7 @@ class SocialNavigator:
                 tip = prev
             traj_tips[key] = tip
 
-        # Best trajectory curve (green)
+        # -------------------Best trajectory curve (green)-------------------
         if self._best_traj:
             prev = (rcx, rcy)
             for pt in self._best_traj:
@@ -1630,7 +1642,7 @@ class SocialNavigator:
         #             _cv2.putText(bev, labels[i], (cx_ + 7, cy_ - 5),
         #                          _cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
 
-        # Correction arrow: original tip -> corrected tip (magenta)
+        # ----------Correction arrow: original tip -> corrected tip (magenta)---------
         if self.shield_active and "original" in path_tips and "corrected" in path_tips:
             o_tip = path_tips["original"]
             c_tip = path_tips["corrected"]
@@ -1638,7 +1650,7 @@ class SocialNavigator:
                 _cv2.arrowedLine(bev, o_tip, c_tip,
                                  (255, 0, 255), 2, _cv2.LINE_AA, tipLength=0.3)
 
-        # Legend
+        # -------------------Legend-------------------
         lx, ly = 10, sz - 75
         legend_items = [("Original", (255, 255, 0)),
                         ("Corrected", (0, 255, 255)),
@@ -1652,7 +1664,7 @@ class SocialNavigator:
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
             ly += 16
 
-        # Tracked humans
+        # -------------------Tracked humans-------------------
         for human in self._tracked_humans.values():
             if human.position_rf is None:
                 continue
@@ -1685,7 +1697,7 @@ class SocialNavigator:
                     if 0 <= tx < sz and 0 <= ty < sz:
                         _cv2.circle(bev, (tx, ty), 4, (0, 165, 255), -1)
 
-        # Goal marker
+        # -------------------Goal marker-------------------
         if self._goal_rf is not None:
             gpx = int(rcx + self._goal_rf[0] * scale)
             gpy = int(rcy - self._goal_rf[1] * scale)
@@ -1817,10 +1829,11 @@ class SocialNavigator:
             if h.position_rf is not None
         ]
         if not human_positions:
-            # No humans — return uniform safe grid
+            # No humans — assign and return uniform safe grid
             x = np.arange(xlim[0], xlim[1], resolution)
             y = np.arange(ylim[0], ylim[1], resolution)
-            return np.ones((len(y), len(x))), [xlim[0], xlim[1], ylim[0], ylim[1]]
+            self.grid = np.ones((len(y), len(x)))
+            return self.grid, [xlim[0], xlim[1], ylim[0], ylim[1]]
 
         human_predicted_paths = {
             h.track_id: h.predicted_path
