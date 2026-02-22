@@ -88,15 +88,15 @@ class SocialNavigator:
     DEFAULT_PARAMS = {
         # --- Action shield  params ---
         "shield_thresh_on": 0.5,    # safety score below this → shield activates
-        "shield_thresh_off": 0.9,   # safety score above this → shield deactivates (hysteresis)
+        "shield_thresh_off": 0.75,   # safety score above this → shield deactivates (hysteresis)
         "shield_active_states": ["running"],  # mission states where shield is armed
         "mono_k": 300.0,
         "correction_gain": 25.0,
         "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
         "max_omega_mag": 1.0,
         # Robot pred
-        "horizon_s": 5.0,
-        "horizon_steps": 25,
+        "horizon_s": 2.0,
+        "horizon_steps": 10,
         "path_curvature": 0.45,       # tuned so that predicted robot trajectory matches real one  
         # --- Camera params  ---
         "image_width": 640,
@@ -124,7 +124,8 @@ class SocialNavigator:
         "lidar_kpt_conf_thresh": 0.5,  # min keypoint confidence to use for skeleton matching
         "lidar_skeleton_dist": 0.05,   # max normalized image distance from skeleton to count as "on person"
         # --- BEV minimap display ---
-        "bev_range_m": 7.0,            # visible range in BEV (meters), independent of d_max
+        "bev_range_m": 7.0,            # visible forward range in BEV (meters), independent of d_max
+        "bev_behind_m": 2.0,           # how many meters behind the robot to show in BEV / heatmap
         # --- Ego-motion compensation ---
         "time_step": 0.25,            # seconds per control cycle (for ego-motion compensation)
         # --- LiDAR-camera overlay calibration ---
@@ -133,18 +134,14 @@ class SocialNavigator:
         "lidar_cam_z_offset": 0.05,    # meters, camera height above lidar (positive = camera higher)
         "lidar_cam_fov_scale": 1.0,    # multiplier on fov_deg for fine-tuning projection
         # --- Ghost humans (out-of-FOV persistence) ---
-        "ghost_max_frames": 200,       # max frames a ghost persists (~30s at 4 Hz)
+        "ghost_max_frames": 400,       # max frames a ghost persists (~30s at 4 Hz)
         # --- Debug / visualisation ---
         "show_bezier_pts": False,      # draw Bezier control points on BEV
-        # --- Elastic band trajectory ---
-        "eband_alpha_rep": 0.05,       # repulsive force gain
-        "eband_alpha_smooth": 0.3,     # smoothing force gain
-        "eband_alpha_inertia": 0.4,    # inertia force gain (aligns start with current motion)
-        "eband_inertia_points": 5,     # how many interior points feel the inertia force
-        "eband_max_iters": 80,         # max optimization iterations
-        "eband_max_curvature": 2.0,    # max allowed curvature (1/meters)
-        "eband_n_points": 25,          # number of trajectory points
-        "eband_converge_thresh": 0.01, # convergence threshold (meters)
+        # --- Gradient-walk trajectory ---
+        "traj_step_size": 0.2,         # step size in meters for gradient walk
+        "traj_gradient_gain": 0.5,     # how strongly the safety gradient nudges each step
+        "traj_goal_gain": 0.3,         # attractive force toward goal during gradient walk
+        "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -177,8 +174,8 @@ class SocialNavigator:
         self.safety_score = 1.0      # 1.0 = fully safe, 0.0 = imminent collision
         self.grid = None
 
-        self.traj_score = 0.05
-        self.best_score = 0.15
+        # self.traj_score = 0.05
+        # self.best_score = 0.15
 
         # --- Shared lidar-to-image projection (built once per frame) ---
         self._lidar_image_points = None  # (N,5) array: [u_norm, v_norm, lx, ly, lz]
@@ -273,7 +270,7 @@ class SocialNavigator:
         self.safety_score = self._compute_safety_score()
         t5 = time.perf_counter()
 
-        self.get_safety_heatmap2()
+        self.get_safety_heatmap()
 
         # 6. Shield gate -- decide whether to intervene
         self.shield_active = self._evaluate_shield(mission_state)
@@ -906,12 +903,6 @@ class SocialNavigator:
 
             ghost_pos = pred[pred_idx]  # [x_lateral, depth]
 
-            # Skip if predicted behind robot (depth <= 0)
-            if ghost_pos[1] <= 0:
-                del self._predictor.agent_trajectories[agent_id]
-                self._predictor.predicted_trajectories.pop(agent_id, None)
-                continue
-
             # De-duplicate: if an observed human is near the ghost's predicted
             # position, they are the same person re-entering FOV with a new
             # tracker ID.  Discard the stale predictor entry.
@@ -933,7 +924,7 @@ class SocialNavigator:
             ghost = TrackedHuman(agent_id)
             ghost.is_ghost = True
             ghost.position_rf = ghost_pos
-            ghost.distance = ghost_pos[1]  # depth as distance estimate
+            ghost.distance = math.hypot(ghost_pos[0], ghost_pos[1])
             ghost.predicted_path = pred[pred_idx:]  # remaining predicted path
             # Estimate velocity from predictor history
             if len(traj) >= 2:
@@ -1022,28 +1013,23 @@ class SocialNavigator:
             passthrough
         Returns:
             [v_x', v_y', omega_z']  -- corrected motion vector
-
-        
         """
         if not self.shield_active:
             return motion_vector
 
         vx, vy, omega = motion_vector[0], motion_vector[1], motion_vector[2]
 
-        threat = 1.0 - self.safety_score          # 0 = safe, 1 = dangerous
-
         # omega_correction = self._bezier_curve_correction(motion_vector)
-        omega_correction = self._elastic_correction(motion_vector)
+        omega_corrected = self._omega_from_trajectory(motion_vector)
         max_omega = self.params["max_omega_mag"]
 
         vx_corrected = vx
         vy_corrected = vy
-        omega_corrected = omega + omega_correction
         # clip omega
         omega_corrected = max(-max_omega, min(omega_corrected, max_omega))
         logger.info(
-            "SHIELD  threat=%.2f  omega_corr=%.3f  omega %.3f->%.3f",
-            threat, omega_correction, omega, omega_corrected,
+            "SHIELD  safety=%.2f  omega %.3f->%.3f",
+            self.safety_score, omega, omega_corrected,
         )
         return [vx_corrected, vy_corrected, omega_corrected]
     
@@ -1095,112 +1081,57 @@ class SocialNavigator:
 
         return min(correction, 1.0)
 
-    def _elastic_correction(self, motion_vector):
-        """Compute omega correction from the elastic-band trajectory.
+    def _omega_from_trajectory(self, motion_vector):
+        """Compute the target omega from the curvature of the elastic-band trajectory.
 
-        Uses the heading difference between the robot's current forward
-        direction and the initial segment of ``self._best_traj`` (the
-        elastic-band result).  The correction steers the robot to follow
-        the optimised trajectory.
+        Estimates the signed Menger curvature of ``self._best_traj`` near the
+        start using three evenly-spaced sample points, then returns the omega
+        required to track that curvature at the robot's current forward speed:
+
+            omega = v_fwd * kappa
+
+        This is the actual omega value to send to the robot, not an additive
+        correction on top of the existing omega.
 
         Returns:
-            omega_correction (float) — additive angular-rate correction.
+            omega (float) — target angular rate (rad/s).
         """
         if not self._best_traj or len(self._best_traj) < 3:
             return 0.0
 
         pts = np.asarray(self._best_traj, dtype=np.float64)
 
-        # --- Desired heading from trajectory's first segment ---
-        # Use a segment a few points ahead so noise at the origin doesn't
-        # dominate.  Pick point index ~20 % into the trajectory (at least 2).
-        look = max(2, len(pts) // 5)
-        seg = pts[look] - pts[0]
-        seg_len = np.linalg.norm(seg)
-        if seg_len < 1e-6:
+        # Three sample points spaced ~10 % of the trajectory apart so the
+        # curvature estimate is local to the start but not noise-dominated.
+        look = max(1, len(pts) // 10)
+        look2 = min(2 * look, len(pts) - 1)
+        A, B, C = pts[0], pts[look], pts[look2]
+
+        AB = B - A
+        BC = C - B
+        AC = C - A
+        len_AB = np.linalg.norm(AB)
+        len_BC = np.linalg.norm(BC)
+        len_AC = np.linalg.norm(AC)
+
+        if len_AB < 1e-6 or len_BC < 1e-6 or len_AC < 1e-6:
             return 0.0
 
-        # Heading angle of the trajectory departure in BEV
-        # BEV: +x = right, +y = forward.  atan2(dx, dy) gives angle from +y.
-        theta_traj = math.atan2(seg[0], seg[1])
+        # Signed Menger curvature in BEV frame (+x = right, +y = forward).
+        # cross2d(AB, BC) > 0 → left turn → positive omega.
+        cross = AB[0] * BC[1] - AB[1] * BC[0]
+        kappa = 2.0 * cross / (len_AB * len_BC * len_AC)
 
-        # Robot currently faces +y in robot frame → theta_robot = 0
-        heading_error = theta_traj  # theta_traj - 0
+        v_fwd = motion_vector[0]
+        return v_fwd * kappa
 
-        # Wrap to [-pi, pi] (should already be, but be safe)
-        heading_error = (heading_error + math.pi) % (2 * math.pi) - math.pi
-
-        # Convert to omega correction: proportional control
-        gain = self.params["correction_gain"]
-        omega_correction = gain * heading_error
-
-        return -omega_correction
-
-    def _get_best_traj(self):
-        """
-        Compute angular correction to steer away from a specific human using a Bezier curve approach.
-        This is a placeholder for a more advanced correction method that considers the predicted path of the human.
-        """
-        if self._goal_rf is None:
-            return [], 0.0, None
-
-        t_start = time.time()
-
-        check_range = 2.0 # m
-        step_size = 0.25 # m (coarse grid for now)
-
-        steps = 20 # number of arc segments
-
-        [x_lat, depth] = self._goal_rf
-        heading = np.array([0.0, 1.0])
-
-        # P0: robot at origin
-        p0 = np.array([0.0, 0.0])
-        # P3: goal in BEV coords [x_lateral, depth]
-        p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
-
-        # Pre-extract human data once for the whole batch.
-        _human_positions = [
-            tuple(h.position_rf)
-            for h in self._tracked_humans.values()
-            if h.position_rf is not None
-        ]
-        _human_predicted_paths = {
-            h.track_id: h.predicted_path
-            for h in self._tracked_humans.values()
-            if h.predicted_path
-        }
-
-        x_offsets = np.arange(x_lat- check_range, x_lat + check_range, step_size)
-        best_curve = []
-        best_score = -1.0
-        best_lowest_safety = 0.0
-        best_control_pts = None
-        n_evaluated = 0
-        best_similarity = 0.0
-        for x_offset in x_offsets:
-            curve, control_pts = self._construct_bezier(x_offset, steps=steps)
-            score, lowest_safety_val = self._trajectory_eval_v2(
-                curve, _human_positions, _human_predicted_paths)
-
-            traj_similarity = self._trajectory_similarity_v2(curve)
-
-            n_evaluated += 1
-            if score > best_score:
-                best_curve = curve
-                best_score = score
-                best_lowest_safety = lowest_safety_val
-                best_similarity = traj_similarity
-                best_control_pts = control_pts
-        elapsed = time.time() - t_start
-        logger.info(
-            "_get_best_traj: %d curves in %.3fs  best_score=%.3f  lowest_safety=%.3f best_similarity=%.3f",
-            n_evaluated, elapsed, best_score, best_lowest_safety, best_similarity
-        )
-        return best_curve, best_score, best_control_pts
-
-    def _get_best_traj_v2(self):
+    def _get_best_traj(self, traj_type="elastic"):
         """Build an elastic-band trajectory and return it with its safety score."""
+        
+        if traj_type not in ["elastic", "bezier"]:
+            logger.error("invalid trajectory type")
+            return self._current_traj, self._current_traj_score
+        
         if self._goal_rf is None:
             return [], 0.0
         t_start = time.perf_counter()
@@ -1213,7 +1144,7 @@ class SocialNavigator:
 
         elapsed = time.perf_counter() - t_start
         logger.warning(
-            "_get_best_traj_v2: elastic band in %.3fs  score=%.3f  lowest_safety=%.3f",
+            "_get_best_traj: elastic band in %.3fs  score=%.3f  lowest_safety=%.3f",
             elapsed, score, lowest_safety_val,
         )
         return curve, score
@@ -1375,7 +1306,7 @@ class SocialNavigator:
         # --- Find best trajectory (always refresh when goal is known) ---
         if self._goal_rf is not None:
             try:
-                best_traj, best_score = self._get_best_traj_v2()
+                best_traj, best_score = self._get_best_traj(traj_type="elastic")
                 self._best_traj = best_traj if best_traj else (self._current_traj or None)
                 # self._best_control_pts = best_cp
                 self._best_traj_score = best_score
@@ -1421,7 +1352,9 @@ class SocialNavigator:
         sz = 400
         pad = 60
         bev_range = self.params["bev_range_m"]
-        scale = (sz - 2 * pad) / bev_range
+        bev_behind = self.params["bev_behind_m"]
+        inner = sz - 2 * pad
+        scale = inner / (bev_range + bev_behind)
 
         bev = np.zeros((sz, sz, 3), dtype=np.uint8)
 
@@ -1431,13 +1364,6 @@ class SocialNavigator:
 
         # -------------------Safety heatmap underlay-------------------
         if show_heatmap:
-            t0 = time.perf_counter()
-            # self.grid, extent = self.get_safety_heatmap(
-            #     xlim=(-bev_range / 2, bev_range / 2),
-            #     ylim=(0, bev_range),
-            #     resolution=bev_range / 50,
-            # )
-            t1 = time.perf_counter()
             if self.grid is not None:
                 if not hasattr(self, '_bev_cmap'):
                     import matplotlib
@@ -1445,7 +1371,6 @@ class SocialNavigator:
                     self._bev_cmap = matplotlib.cm.get_cmap('RdYlGn')
                 rgba = self._bev_cmap(self.grid)[:, :, :3]
                 hm_bgr = (rgba[:, :, ::-1] * 255).astype(np.uint8)
-                inner = sz - 2 * pad
                 hm_bgr = _cv2.resize(hm_bgr, (inner, inner), interpolation=_cv2.INTER_NEAREST)
                 hm_bgr = _cv2.flip(hm_bgr, 0)
                 bev[pad:pad+inner, pad:pad+inner] = hm_bgr
@@ -1476,9 +1401,9 @@ class SocialNavigator:
 
         _cv2.rectangle(bev, (0, 0), (sz - 1, sz - 1), (127, 127, 127), 1)
 
-        # Robot at bottom-center
+        # Robot position: shifted up from bottom by bev_behind portion
         rcx = sz // 2
-        rcy = sz - pad
+        rcy = pad + int(bev_range * scale)
 
         # -------------------Camera FOV lines-------------------
         half_fov = np.radians(self.params["fov_deg"] / 2.0)
@@ -1569,27 +1494,6 @@ class SocialNavigator:
         _cv2.putText(bev, f"Bird's Eye View  [{count_str} human{'s' if (n_observed + n_ghosts) != 1 else ''}]",
                      (10, 25), _cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
-        # -------------------Robot motion-vector curves-------------------
-        path_tips = {}  # key: "original" or "corrected" -> (px, py)
-        for vec, color, key in [
-            (self._motion_original,  (255, 255, 0),  "original"),
-            (self._motion_modulated, (0, 255, 255),  "corrected"),
-        ]:
-            if vec is None:
-                continue
-            path = self._extrapolate_robot_path(vec)
-            prev = (rcx, rcy)
-            tip = prev
-            for pt in path:
-                px = int(rcx + pt[0] * scale)
-                py = int(rcy - pt[1] * scale)
-                if not (0 <= px < sz and 0 <= py < sz):
-                    break
-                _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
-                prev = (px, py)
-                tip = prev
-            path_tips[key] = tip
-
         # -------------------Full Robot trajectory curves-------------------
         traj_tips = {}  # key: "original" or "corrected" -> (px, py)
         for vec, color, key in [
@@ -1619,10 +1523,38 @@ class SocialNavigator:
                 py = int(rcy - pt[1] * scale)
                 if not (0 <= px < sz and 0 <= py < sz):
                     break
-                _cv2.line(bev, prev, (px, py), (0, 255, 0), 2, _cv2.LINE_AA)
+                _cv2.line(bev, prev, (px, py), (0, 255, 255), 2, _cv2.LINE_AA)
                 prev = (px, py)
         else:
             logger.info("self.best_traj is None")
+
+        # -------------------Robot motion-vector curves-------------------
+        path_tips = {}  # key: "original" or "corrected" -> (px, py)
+        for vec, color, key in [
+            (self._motion_original,  (255, 0, 255),  "original"),
+            (self._motion_modulated, (0, 255, 255),  "corrected"),
+        ]:
+            if vec is None:
+                continue
+            path = self._extrapolate_robot_path(vec)
+            prev = (rcx, rcy)
+            tip = prev
+            for pt in path:
+                px = int(rcx + pt[0] * scale)
+                py = int(rcy - pt[1] * scale)
+                if not (0 <= px < sz and 0 <= py < sz):
+                    break
+                _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
+                prev = (px, py)
+                tip = prev
+            path_tips[key] = tip
+        # ----------Correction arrow: original tip -> corrected tip (magenta)---------
+        # if self.shield_active and "original" in path_tips and "corrected" in path_tips:
+        #     o_tip = path_tips["original"]
+        #     c_tip = path_tips["corrected"]
+        #     if o_tip != c_tip:
+        #         _cv2.arrowedLine(bev, o_tip, c_tip,
+        #                          (255, 0, 255), 2, _cv2.LINE_AA, tipLength=0.3)
 
         # # Bezier control points (white dots + dashed control polygon)
         # if self.params["show_bezier_pts"] and self._best_control_pts is not None:
@@ -1642,13 +1574,7 @@ class SocialNavigator:
         #             _cv2.putText(bev, labels[i], (cx_ + 7, cy_ - 5),
         #                          _cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
 
-        # ----------Correction arrow: original tip -> corrected tip (magenta)---------
-        if self.shield_active and "original" in path_tips and "corrected" in path_tips:
-            o_tip = path_tips["original"]
-            c_tip = path_tips["corrected"]
-            if o_tip != c_tip:
-                _cv2.arrowedLine(bev, o_tip, c_tip,
-                                 (255, 0, 255), 2, _cv2.LINE_AA, tipLength=0.3)
+
 
         # -------------------Legend-------------------
         lx, ly = 10, sz - 75
@@ -1752,52 +1678,52 @@ class SocialNavigator:
 
         return image
 
-    #  Safety heatmap (shared by deploy + simulation) 
-    def get_safety_heatmap(self, xlim=(-5, 5), ylim=(-5, 5), resolution=0.2):
-        """
-        Compute a 2D safety heatmap from the currently tracked humans.
+    # #  Safety heatmap (shared by deploy + simulation) 
+    # def get_safety_heatmap(self, xlim=(-5, 5), ylim=(-5, 5), resolution=0.2):
+    #     """
+    #     Compute a 2D safety heatmap from the currently tracked humans.
 
-        Works identically for both paths:
-          - deploy:  _tracked_humans filled by step()  (perception)
-          - sim:     _tracked_humans filled by step_ground_truth()
+    #     Works identically for both paths:
+    #       - deploy:  _tracked_humans filled by step()  (perception)
+    #       - sim:     _tracked_humans filled by step_ground_truth()
 
-        All coordinates are in robot frame (robot at origin).
+    #     All coordinates are in robot frame (robot at origin).
 
-        Args:
-            xlim: (xmin, xmax) lateral bounds in meters
-            ylim: (ymin, ymax) depth bounds in meters
-            resolution: grid cell size in meters
+    #     Args:
+    #         xlim: (xmin, xmax) lateral bounds in meters
+    #         ylim: (ymin, ymax) depth bounds in meters
+    #         resolution: grid cell size in meters
 
-        Returns:
-            safety_grid: 2D numpy array, values in [0, 1]
-            extent:      [xmin, xmax, ymin, ymax] for imshow
-            Returns (None, None) if no humans are tracked.
-        """
-        human_positions = [
-            tuple(h.position_rf)
-            for h in self._tracked_humans.values()
-            if h.position_rf is not None
-        ]
-        if not human_positions:
-            # No humans — return uniform safe grid
-            x = np.arange(xlim[0], xlim[1], resolution)
-            y = np.arange(ylim[0], ylim[1], resolution)
-            return np.ones((len(y), len(x))), [xlim[0], xlim[1], ylim[0], ylim[1]]
+    #     Returns:
+    #         safety_grid: 2D numpy array, values in [0, 1]
+    #         extent:      [xmin, xmax, ymin, ymax] for imshow
+    #         Returns (None, None) if no humans are tracked.
+    #     """
+    #     human_positions = [
+    #         tuple(h.position_rf)
+    #         for h in self._tracked_humans.values()
+    #         if h.position_rf is not None
+    #     ]
+    #     if not human_positions:
+    #         # No humans — return uniform safe grid
+    #         x = np.arange(xlim[0], xlim[1], resolution)
+    #         y = np.arange(ylim[0], ylim[1], resolution)
+    #         return np.ones((len(y), len(x))), [xlim[0], xlim[1], ylim[0], ylim[1]]
 
-        human_predicted_paths = {
-            h.track_id: h.predicted_path
-            for h in self._tracked_humans.values()
-            if h.predicted_path
-        }
+    #     human_predicted_paths = {
+    #         h.track_id: h.predicted_path
+    #         for h in self._tracked_humans.values()
+    #         if h.predicted_path
+    #     }
 
-        self.grid, extent = compute_safety_grid(
-            human_positions, xlim, ylim,
-            resolution=resolution,
-            human_predicted_paths=human_predicted_paths or None,
-        )
-        return self.grid, extent
+    #     self.grid, extent = compute_safety_grid(
+    #         human_positions, xlim, ylim,
+    #         resolution=resolution,
+    #         human_predicted_paths=human_predicted_paths or None,
+    #     )
+    #     return self.grid, extent
     
-    def get_safety_heatmap2(self, xlim=(-5, 5), ylim=(-5, 5), resolution=0.2):
+    def get_safety_heatmap(self, xlim=(-5, 5), ylim=(-5, 5), resolution=0.2):
         """
         Compute a 2D safety heatmap from the currently tracked humans.
 
@@ -1819,9 +1745,10 @@ class SocialNavigator:
         """
 
         bev_range = self.params["bev_range_m"]
+        bev_behind = self.params["bev_behind_m"]
         xlim=(-bev_range / 2, bev_range / 2)
-        ylim=(0, bev_range)
-        resolution=bev_range / 50
+        ylim=(-bev_behind, bev_range)
+        resolution=(bev_range + bev_behind) / 50
             
         human_positions = [
             tuple(h.position_rf)
@@ -1993,28 +1920,61 @@ class SocialNavigator:
         return new_pts
 
     @staticmethod
-    def _clamp_curvature(traj, max_kappa):
-        """Limit discrete Menger curvature at each interior point.
+    def _clamp_curvature(traj, max_kappa, max_passes=10, start_idx=1):
+        """Hard-limit Menger curvature by blending Q toward the P-R line.
 
-        For any triple (p_{i-1}, p_i, p_{i+1}), the Menger curvature is
-        κ = 2 |cross| / (|a| |b| |c|) where a, b, c are the three sides.
-        If κ > max_kappa the middle point is moved toward the midpoint of its
-        neighbours until the curvature is at most max_kappa.
+        For each violating triple (P, Q, R), Q is moved toward the midpoint
+        of P and R (i.e. flattened) using a binary search to find the exact
+        blend factor that produces curvature == max_kappa.  Multi-pass
+        iteration handles cascading corrections.
         """
-        for i in range(1, len(traj) - 1):
-            a = traj[i] - traj[i - 1]
-            b = traj[i + 1] - traj[i]
-            c = traj[i + 1] - traj[i - 1]
-            la, lb, lc = np.linalg.norm(a), np.linalg.norm(b), np.linalg.norm(c)
-            if la < 1e-9 or lb < 1e-9 or lc < 1e-9:
-                continue
-            cross = abs(a[0] * b[1] - a[1] * b[0])
-            kappa = 2.0 * cross / (la * lb * lc)
-            if kappa > max_kappa:
-                mid = 0.5 * (traj[i - 1] + traj[i + 1])
-                # Blend toward midpoint to reduce curvature
-                blend = max_kappa / kappa
-                traj[i] = blend * traj[i] + (1.0 - blend) * mid
+        for _ in range(max_passes):
+            any_violation = False
+            for i in range(start_idx, len(traj) - 1):
+                P = traj[i - 1]
+                Q = traj[i]
+                R = traj[i + 1]
+
+                a = Q - P
+                b = R - Q
+                la = np.linalg.norm(a)
+                lb = np.linalg.norm(b)
+                lc = np.linalg.norm(R - P)
+                if la < 1e-9 or lb < 1e-9 or lc < 1e-9:
+                    continue
+
+                cross = a[0] * b[1] - a[1] * b[0]
+                kappa = 2.0 * abs(cross) / (la * lb * lc)
+                if kappa <= max_kappa:
+                    continue
+
+                any_violation = True
+
+                # Binary search: blend Q toward the P-R midpoint until
+                # curvature == max_kappa.  t=0 keeps Q, t=1 is on the line.
+                M = 0.5 * (P + R)
+                lo, hi = 0.0, 1.0
+                for _ in range(20):
+                    t = 0.5 * (lo + hi)
+                    Qt = Q + t * (M - Q)
+                    at = Qt - P
+                    bt = R - Qt
+                    lat = np.linalg.norm(at)
+                    lbt = np.linalg.norm(bt)
+                    if lat < 1e-9 or lbt < 1e-9:
+                        lo = t
+                        continue
+                    ct = a[0] * b[1] - a[1] * b[0]  # cross doesn't change direction
+                    ct = at[0] * bt[1] - at[1] * bt[0]
+                    kt = 2.0 * abs(ct) / (lat * lbt * lc)
+                    if kt > max_kappa:
+                        lo = t
+                    else:
+                        hi = t
+                traj[i] = Q + lo * (M - Q)
+
+            if not any_violation:
+                break
         return traj
 
     @staticmethod
@@ -2060,28 +2020,48 @@ class SocialNavigator:
         return np.column_stack([gx, gy])
 
     # -------------------------------------------------------------- #
-    #  Elastic-band trajectory construction                          #
+    #  Gradient-walk + Bezier trajectory construction                #
     # -------------------------------------------------------------- #
 
+    @staticmethod
+    def _sample_safety(pt, grid, xlim, ylim, resolution):
+        """Bilinear-interpolated safety value at a single world-coord point."""
+        rows, cols = grid.shape
+        cx = (pt[0] - xlim[0]) / resolution
+        cy = (pt[1] - ylim[0]) / resolution
+        cx = np.clip(cx, 0, cols - 1.001)
+        cy = np.clip(cy, 0, rows - 1.001)
+        ix = int(math.floor(cx))
+        iy = int(math.floor(cy))
+        fx = cx - ix
+        fy = cy - iy
+        ix1 = min(ix + 1, cols - 1)
+        iy1 = min(iy + 1, rows - 1)
+        v00 = grid[iy,  ix]
+        v10 = grid[iy,  ix1]
+        v01 = grid[iy1, ix]
+        v11 = grid[iy1, ix1]
+        return (v00 * (1 - fx) * (1 - fy)
+                + v10 * fx * (1 - fy)
+                + v01 * (1 - fx) * fy
+                + v11 * fx * fy)
+
     def _construct_trajectory(self):
-        """Build a trajectory from (0,0) to goal using elastic-band optimisation.
+        """Build a trajectory by walking forward with gradient nudges.
 
-        The band is a chain of N equidistant points.  At each iteration every
-        interior point is displaced by:
-          • a *repulsive* force from the safety-heatmap gradient (pushes away
-            from humans / low-safety zones),
-          • a *smoothing* (elastic) force that pulls the point toward the
-            midpoint of its neighbours, and
-          • an *inertia* force on the first few points that pulls them toward
-            the robot's current motion direction, keeping the trajectory
-            departure aligned with what the robot is already doing.
+        Phase 1 — Gradient walk:
+          Start at (0, 0) stepping in the robot's heading direction.
+          At each step the safety-heatmap gradient nudges the path away
+          from low-safety zones.  The walk continues until the safety
+          value at the current point exceeds shield_thresh_off.
 
-        After each iteration the band is re-parameterised to equidistant
-        spacing, curvature is clamped, and monotonic ordering along the
-        start→goal direction is enforced.
+        Phase 2 — Bezier to goal:
+          From the endpoint of the gradient walk, a cubic Bezier curve
+          is constructed to the goal, departing tangent to the last
+          walk heading.
 
         Returns:
-            list of [x, y] in robot frame (same format as _bezier / _current_traj).
+            list of [x, y] in robot frame.
         """
         # --- Early-exit edge cases -------------------------------- #
         if self._goal_rf is None or self.grid is None:
@@ -2092,101 +2072,88 @@ class SocialNavigator:
             return [[0.0, 0.0], goal.tolist()]
 
         # --- Parameters ------------------------------------------- #
-        N = self.params["eband_n_points"]
-        alpha_rep = self.params["eband_alpha_rep"]
-        alpha_smooth = self.params["eband_alpha_smooth"]
-        alpha_inertia = self.params["eband_alpha_inertia"]
-        n_inertia = self.params["eband_inertia_points"]
-        max_iters = self.params["eband_max_iters"]
-        max_kappa = self.params["eband_max_curvature"]
-        conv_thresh = self.params["eband_converge_thresh"]
+        step_size = self.params.get("traj_step_size", 0.2)
+        grad_gain = self.params.get("traj_gradient_gain", 0.5)
+        goal_gain = self.params.get("traj_goal_gain", 0.3)
+        max_steps = self.params.get("traj_max_steps", 100)
+        thresh_off = self.params["shield_thresh_off"]
+        curvature = self.params.get("path_curvature", 0.5)
 
-        # --- Robot heading in BEV coords -------------------------- #
-        # In robot frame the robot always faces +y, regardless of speed.
-        heading_dir = np.array([0.0, 1.0], dtype=np.float64)
+        # --- Departure direction ---------------------------------- #
+        departure_dir = np.array([0.0, 1.0], dtype=np.float64)
+        if self._ego_velocity is not None:
+            bev_x = float(self._ego_velocity[1])   # lateral  → BEV x
+            bev_y = float(self._ego_velocity[0])   # forward  → BEV y
+            v_mag = math.hypot(bev_x, bev_y)
+            if v_mag > 0.01:
+                departure_dir = np.array([bev_x, bev_y], dtype=np.float64) / v_mag
 
-        # --- Grid geometry (mirrors get_safety_heatmap2) ---------- #
+        # --- Grid geometry (mirrors get_safety_heatmap) ----------- #
         bev_range = self.params["bev_range_m"]
+        bev_behind = self.params["bev_behind_m"]
         xlim = (-bev_range / 2.0, bev_range / 2.0)
-        ylim = (0.0, bev_range)
-        resolution = bev_range / 50.0
+        ylim = (-bev_behind, bev_range)
+        resolution = (bev_range + bev_behind) / 50.0
 
         # --- Precompute gradient of safety grid ------------------- #
-        # np.gradient returns (d/d_row, d/d_col) = (d/dy, d/dx) in grid space.
         gy_grid, gx_grid = np.gradient(self.grid)
 
-        # --- Initialise band -------------------------------------- #
-        if (self._current_traj is not None
-                and len(self._current_traj) >= 2):
-            seed = np.array(self._current_traj, dtype=np.float64)
-            band = self._reparameterize_equidistant(seed, N)
-        else:
-            band = np.linspace(np.array([0.0, 0.0]), goal, N)
-        # Pin endpoints
-        band[0] = [0.0, 0.0]
-        band[-1] = goal
+        # --- Phase 1: gradient walk ------------------------------- #
+        points = [np.array([0.0, 0.0])]
+        heading = departure_dir.copy()
 
-        # Start→goal unit direction (for monotonic ordering check)
-        sg_dir = goal / goal_dist
+        for _ in range(max_steps):
+            cur = points[-1]
 
-        # --- Iterative optimisation ------------------------------- #
-        for _it in range(max_iters):
-            interior = band[1:-1]  # (N-2, 2), view
-
-            # 1. Repulsive force from safety gradient
+            # Sample gradient at current point (push toward higher safety)
             grad = self._sample_gradient(
-                interior, gx_grid, gy_grid, xlim, ylim, resolution)
-            f_rep = alpha_rep * grad
+                cur.reshape(1, 2), gx_grid, gy_grid, xlim, ylim, resolution
+            )[0]  # shape (2,)
 
-            # 2. Elastic (smoothing) force
-            f_smooth = alpha_smooth * (
-                band[:-2] + band[2:] - 2.0 * interior)
+            # Attractive force toward goal (unit vector from cur to goal)
+            to_goal = goal - cur
+            tg_dist = np.linalg.norm(to_goal)
+            f_goal = (to_goal / tg_dist) * goal_gain if tg_dist > 1e-9 else 0.0
 
-            # 3. Inertia force — pull the first few points toward the
-            #    robot's current heading direction.  Each point i should
-            #    lie along origin + t_i * heading_dir, so the force is the
-            #    lateral error toward that ideal line.  Strength decays
-            #    linearly from full at point 1 to zero at n_inertia+1.
-            f_inertia = np.zeros_like(interior)
-            if alpha_inertia > 0:
-                k = min(n_inertia, len(interior))
-                for j in range(k):
-                    pt = band[j + 1]  # interior point j corresponds to band[j+1]
-                    # Project pt onto heading line through origin
-                    proj_len = np.dot(pt, heading_dir)
-                    proj_pt = proj_len * heading_dir
-                    # Force = vector from current position toward projected position
-                    weight = 1.0 - j / (k)  # linear decay
-                    f_inertia[j] = alpha_inertia * weight * (proj_pt - pt)
+            # New direction = forward heading + gradient nudge + goal pull
+            step_dir = heading + grad_gain * grad + f_goal
+            step_norm = np.linalg.norm(step_dir)
+            if step_norm > 1e-9:
+                step_dir = step_dir / step_norm
 
-            # 4. Update interior points
-            displacement = f_rep + f_smooth + f_inertia
-            band[1:-1] = interior + displacement
+            nxt = cur + step_dir * step_size
+            points.append(nxt)
+            heading = step_dir  # update heading for next step
 
-            # --- Post-iteration constraints ----------------------- #
-            # Re-parameterize to equidistant spacing
-            band = self._reparameterize_equidistant(band, N)
-            band[0] = [0.0, 0.0]
-            band[-1] = goal
-
-            # Monotonic ordering along start→goal direction
-            for i in range(1, N - 1):
-                proj_prev = np.dot(band[i] - band[i - 1], sg_dir)
-                if proj_prev < 0:
-                    # Project back: place on line through band[i-1] at same
-                    # lateral offset but with non-negative forward progress
-                    perp = band[i] - band[i - 1] - proj_prev * sg_dir
-                    band[i] = band[i - 1] + perp  # zero forward step
-
-            # Curvature limiting
-            band = self._clamp_curvature(band, max_kappa)
-
-            # Convergence check
-            max_disp = np.max(np.hypot(displacement[:, 0], displacement[:, 1]))
-            if max_disp < conv_thresh:
+            # Check if we've reached safety
+            safety = self._sample_safety(
+                nxt, self.grid, xlim, ylim, resolution)
+            if safety >= thresh_off:
                 break
 
-        return band.tolist()
+            # Stop if we've passed the goal distance
+            if np.linalg.norm(nxt) >= goal_dist:
+                break
+
+        # --- Phase 2: Bezier from walk endpoint to goal ----------- #
+        p0 = points[-1]
+        p3 = goal
+        remaining = np.linalg.norm(p3 - p0)
+
+        if remaining > 0.05:
+            tangent_len = curvature * remaining / 2.0
+            p1 = p0 + heading * tangent_len
+            p1p3 = p1 - p3
+            p2 = p3 + p1p3 * (1.0 / 3.0)
+            bezier_pts = self._bezier(p0, p1, p2, p3,
+                                      steps=max(10, int(remaining / step_size)))
+            # Skip first bezier point (== p0, already in points list)
+            result = [p.tolist() for p in points] + bezier_pts[1:]
+        else:
+            result = [p.tolist() for p in points]
+            
+
+        return result
 
 
 
