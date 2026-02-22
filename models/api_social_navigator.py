@@ -87,12 +87,13 @@ class SocialNavigator:
     # ------------------------------------------------------------------ #
     DEFAULT_PARAMS = {
         # --- Action shield  params ---
-        "shield_thresh_on": 0.7,    # safety score below this → shield activates
-        "shield_thresh_off": 0.8,   # safety score above this → shield deactivates (hysteresis)
+        "shield_thresh_on": 0.5,    # safety score below this → shield activates
+        "shield_thresh_off": 0.9,   # safety score above this → shield deactivates (hysteresis)
         "shield_active_states": ["running"],  # mission states where shield is armed
         "mono_k": 300.0,
         "correction_gain": 25.0,
         "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
+        "max_omega_mag": 1.0,
         # Robot pred
         "horizon_s": 5.0,
         "horizon_steps": 25,
@@ -135,6 +136,15 @@ class SocialNavigator:
         "ghost_max_frames": 120,       # max frames a ghost persists (~30s at 4 Hz)
         # --- Debug / visualisation ---
         "show_bezier_pts": False,      # draw Bezier control points on BEV
+        # --- Elastic band trajectory ---
+        "eband_alpha_rep": 0.05,       # repulsive force gain
+        "eband_alpha_smooth": 0.3,     # smoothing force gain
+        "eband_alpha_inertia": 0.4,    # inertia force gain (aligns start with current motion)
+        "eband_inertia_points": 5,     # how many interior points feel the inertia force
+        "eband_max_iters": 80,         # max optimization iterations
+        "eband_max_curvature": 2.0,    # max allowed curvature (1/meters)
+        "eband_n_points": 25,          # number of trajectory points
+        "eband_converge_thresh": 0.01, # convergence threshold (meters)
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -1022,18 +1032,15 @@ class SocialNavigator:
 
         threat = 1.0 - self.safety_score          # 0 = safe, 1 = dangerous
 
-        # Ensure safety grid is computed for potential field correction
-        # bev_range = self.params["bev_range_m"]
-        # self.grid, _ = self.get_safety_heatmap(
-        #     xlim=(-bev_range / 2, bev_range / 2),
-        #     ylim=(0, bev_range),
-        #     resolution=bev_range / 50,
-        # )
+        # omega_correction = self._bezier_curve_correction(motion_vector)
+        omega_correction = self._elastic_correction(motion_vector)
+        max_omega = self.params["max_omega_mag"]
 
-        omega_correction = self._bezier_curve_correction(motion_vector)
         vx_corrected = vx
         vy_corrected = vy
         omega_corrected = omega + omega_correction
+        # clip omega
+        omega_corrected = max(-max_omega, min(omega_corrected, max_omega))
         logger.info(
             "SHIELD  threat=%.2f  omega_corr=%.3f  omega %.3f->%.3f",
             threat, omega_correction, omega, omega_corrected,
@@ -1084,15 +1091,56 @@ class SocialNavigator:
 
         v_fwd = motion_vector[0]
         omega_desired = self.params["bezier_omega_gain"] * v_fwd * kappa_0
+        correction = omega_desired - motion_vector[2]
 
-        return omega_desired - motion_vector[2]
+        return min(correction, 1.0)
+
+    def _elastic_correction(self, motion_vector):
+        """Compute omega correction from the elastic-band trajectory.
+
+        Uses the heading difference between the robot's current forward
+        direction and the initial segment of ``self._best_traj`` (the
+        elastic-band result).  The correction steers the robot to follow
+        the optimised trajectory.
+
+        Returns:
+            omega_correction (float) — additive angular-rate correction.
+        """
+        if not self._best_traj or len(self._best_traj) < 3:
+            return 0.0
+
+        pts = np.asarray(self._best_traj, dtype=np.float64)
+
+        # --- Desired heading from trajectory's first segment ---
+        # Use a segment a few points ahead so noise at the origin doesn't
+        # dominate.  Pick point index ~20 % into the trajectory (at least 2).
+        look = max(2, len(pts) // 5)
+        seg = pts[look] - pts[0]
+        seg_len = np.linalg.norm(seg)
+        if seg_len < 1e-6:
+            return 0.0
+
+        # Heading angle of the trajectory departure in BEV
+        # BEV: +x = right, +y = forward.  atan2(dx, dy) gives angle from +y.
+        theta_traj = math.atan2(seg[0], seg[1])
+
+        # Robot currently faces +y in robot frame → theta_robot = 0
+        heading_error = theta_traj  # theta_traj - 0
+
+        # Wrap to [-pi, pi] (should already be, but be safe)
+        heading_error = (heading_error + math.pi) % (2 * math.pi) - math.pi
+
+        # Convert to omega correction: proportional control
+        gain = self.params["correction_gain"]
+        omega_correction = gain * heading_error
+
+        return -omega_correction
 
     def _get_best_traj(self):
         """
         Compute angular correction to steer away from a specific human using a Bezier curve approach.
         This is a placeholder for a more advanced correction method that considers the predicted path of the human.
         """
-        print('traj called')
         if self._goal_rf is None:
             return [], 0.0, None
 
@@ -1145,58 +1193,30 @@ class SocialNavigator:
                 best_similarity = traj_similarity
                 best_control_pts = control_pts
         elapsed = time.time() - t_start
-        logger.warning(
+        logger.info(
             "_get_best_traj: %d curves in %.3fs  best_score=%.3f  lowest_safety=%.3f best_similarity=%.3f",
             n_evaluated, elapsed, best_score, best_lowest_safety, best_similarity
         )
         return best_curve, best_score, best_control_pts
 
     def _get_best_traj_v2(self):
-        """
-        Compute angular correction to steer away from a specific human using a Bezier curve approach.
-        This is a placeholder for a more advanced correction method that considers the predicted path of the human.
-        """
+        """Build an elastic-band trajectory and return it with its safety score."""
         if self._goal_rf is None:
-            return [], 0.0, None
+            return [], 0.0
+        t_start = time.perf_counter()
 
-        steps = 20 # number of arc segments
+        curve = self._construct_trajectory()
+        if len(curve) < 2:
+            return [], 0.0
 
-        [x_lat, depth] = self._goal_rf
-        heading = np.array([0.0, 1.0])
+        score, lowest_safety_val = self._trajectory_eval_v2(curve)
 
-        # Pre-extract human data once for the whole batch.
-        _human_positions = [
-            tuple(h.position_rf)
-            for h in self._tracked_humans.values()
-            if h.position_rf is not None
-        ]
-        _human_predicted_paths = {
-            h.track_id: h.predicted_path
-            for h in self._tracked_humans.values()
-            if h.predicted_path
-        }
-
-        offsets = np.arange(-1, 1+0.1, 0.1)
-        for offset in offsets:
-            curve, control_pts = self._construct_trajectory(offset)
-            score, lowest_safety_val = self._trajectory_eval_v2(
-                curve, _human_positions, _human_predicted_paths)
-
-            traj_similarity = self._trajectory_similarity_v2(curve)
-
-            n_evaluated += 1
-            if score > best_score:
-                best_curve = curve
-                best_score = score
-                best_lowest_safety = lowest_safety_val
-                best_similarity = traj_similarity
-                best_control_pts = control_pts
-        elapsed = time.time() - t_start
+        elapsed = time.perf_counter() - t_start
         logger.warning(
-            "_get_best_traj: %d curves in %.3fs  best_score=%.3f  lowest_safety=%.3f best_similarity=%.3f",
-            n_evaluated, elapsed, best_score, best_lowest_safety, best_similarity
+            "_get_best_traj_v2: elastic band in %.3fs  score=%.3f  lowest_safety=%.3f",
+            elapsed, score, lowest_safety_val,
         )
-        return best_curve, best_score, best_control_pts  
+        return curve, score
 
     def _trajectory_eval(self, curve):
         trajectory_score = 0.0
@@ -1355,9 +1375,9 @@ class SocialNavigator:
         # --- Find best trajectory (always refresh when goal is known) ---
         if self._goal_rf is not None:
             try:
-                best_traj, best_score, best_cp = self._get_best_traj()
+                best_traj, best_score = self._get_best_traj_v2()
                 self._best_traj = best_traj if best_traj else (self._current_traj or None)
-                self._best_control_pts = best_cp
+                # self._best_control_pts = best_cp
                 self._best_traj_score = best_score
             except Exception as e:
                 logger.error("_update_trajectory_data _get_best_traj FAILED: %s", e, exc_info=True)
@@ -1917,14 +1937,245 @@ class SocialNavigator:
         heading = np.array([0.0, 1.0])
         p0 = np.array([0.0, 0.0])
         p1 = p0 + heading * curvature * goal_dist /3
-        p2 = p1 + np.array([x_offset, depth * (1/5)])
+
+        # p2 direction logic
+        p1p3 = p1 - p3
+        p2 = p3 - np.array([x_offset, depth * (1/5)])
 
         # Evaluate cubic Bezier
         curve_points = self._bezier(p0, p1, p2, p3, steps=steps)
         return curve_points, (p0, p1, p2, p3)
 
-    def _construct_trajectory(self, offset):
-        pass
+    # -------------------------------------------------------------- #
+    #  Elastic-band helpers                                          #
+    # -------------------------------------------------------------- #
+
+    @staticmethod
+    def _reparameterize_equidistant(traj, n_points):
+        """Redistribute *n_points* equidistantly along the arc of *traj*.
+
+        Args:
+            traj: (M, 2) ndarray of waypoints.
+            n_points: desired output count (>= 2).
+
+        Returns:
+            (n_points, 2) ndarray with first/last points preserved.
+        """
+        diffs = np.diff(traj, axis=0)
+        seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
+        cum = np.concatenate(([0.0], np.cumsum(seg_lens)))
+        total = cum[-1]
+        if total < 1e-9:
+            # Degenerate — all points coincide; return linspace between endpoints
+            return np.linspace(traj[0], traj[-1], n_points)
+        target = np.linspace(0.0, total, n_points)
+        new_pts = np.empty((n_points, 2))
+        new_pts[0] = traj[0]
+        new_pts[-1] = traj[-1]
+        for i in range(1, n_points - 1):
+            idx = np.searchsorted(cum, target[i], side='right') - 1
+            idx = min(idx, len(traj) - 2)
+            frac = (target[i] - cum[idx]) / max(seg_lens[idx], 1e-12)
+            new_pts[i] = traj[idx] + frac * diffs[idx]
+        return new_pts
+
+    @staticmethod
+    def _clamp_curvature(traj, max_kappa):
+        """Limit discrete Menger curvature at each interior point.
+
+        For any triple (p_{i-1}, p_i, p_{i+1}), the Menger curvature is
+        κ = 2 |cross| / (|a| |b| |c|) where a, b, c are the three sides.
+        If κ > max_kappa the middle point is moved toward the midpoint of its
+        neighbours until the curvature is at most max_kappa.
+        """
+        for i in range(1, len(traj) - 1):
+            a = traj[i] - traj[i - 1]
+            b = traj[i + 1] - traj[i]
+            c = traj[i + 1] - traj[i - 1]
+            la, lb, lc = np.linalg.norm(a), np.linalg.norm(b), np.linalg.norm(c)
+            if la < 1e-9 or lb < 1e-9 or lc < 1e-9:
+                continue
+            cross = abs(a[0] * b[1] - a[1] * b[0])
+            kappa = 2.0 * cross / (la * lb * lc)
+            if kappa > max_kappa:
+                mid = 0.5 * (traj[i - 1] + traj[i + 1])
+                # Blend toward midpoint to reduce curvature
+                blend = max_kappa / kappa
+                traj[i] = blend * traj[i] + (1.0 - blend) * mid
+        return traj
+
+    @staticmethod
+    def _sample_gradient(pts, grad_x, grad_y, xlim, ylim, resolution):
+        """Bilinear-interpolated gradient lookup for world-coordinate points.
+
+        Args:
+            pts: (K, 2) world coords [x, y].
+            grad_x, grad_y: 2-D gradient arrays (row=y, col=x).
+            xlim, ylim: (min, max) tuples for the grid domain.
+            resolution: metres per cell.
+
+        Returns:
+            (K, 2) gradient vectors [gx, gy] in world-space units.
+        """
+        rows, cols = grad_x.shape
+        # World → continuous grid coords
+        cx = (pts[:, 0] - xlim[0]) / resolution
+        cy = (pts[:, 1] - ylim[0]) / resolution
+        # Clamp to valid range (zero repulsion outside grid)
+        cx = np.clip(cx, 0, cols - 1.001)
+        cy = np.clip(cy, 0, rows - 1.001)
+        ix = np.floor(cx).astype(int)
+        iy = np.floor(cy).astype(int)
+        fx = cx - ix
+        fy = cy - iy
+        # Clamp upper indices
+        ix1 = np.minimum(ix + 1, cols - 1)
+        iy1 = np.minimum(iy + 1, rows - 1)
+
+        def _bilerp(grid):
+            v00 = grid[iy,  ix]
+            v10 = grid[iy,  ix1]
+            v01 = grid[iy1, ix]
+            v11 = grid[iy1, ix1]
+            return (v00 * (1 - fx) * (1 - fy)
+                    + v10 * fx * (1 - fy)
+                    + v01 * (1 - fx) * fy
+                    + v11 * fx * fy)
+
+        gx = _bilerp(grad_x) / resolution  # convert cell-units → world-units
+        gy = _bilerp(grad_y) / resolution
+        return np.column_stack([gx, gy])
+
+    # -------------------------------------------------------------- #
+    #  Elastic-band trajectory construction                          #
+    # -------------------------------------------------------------- #
+
+    def _construct_trajectory(self):
+        """Build a trajectory from (0,0) to goal using elastic-band optimisation.
+
+        The band is a chain of N equidistant points.  At each iteration every
+        interior point is displaced by:
+          • a *repulsive* force from the safety-heatmap gradient (pushes away
+            from humans / low-safety zones),
+          • a *smoothing* (elastic) force that pulls the point toward the
+            midpoint of its neighbours, and
+          • an *inertia* force on the first few points that pulls them toward
+            the robot's current motion direction, keeping the trajectory
+            departure aligned with what the robot is already doing.
+
+        After each iteration the band is re-parameterised to equidistant
+        spacing, curvature is clamped, and monotonic ordering along the
+        start→goal direction is enforced.
+
+        Returns:
+            list of [x, y] in robot frame (same format as _bezier / _current_traj).
+        """
+        # --- Early-exit edge cases -------------------------------- #
+        if self._goal_rf is None or self.grid is None:
+            return []
+        goal = np.array(self._goal_rf, dtype=np.float64)
+        goal_dist = np.linalg.norm(goal)
+        if goal_dist < 0.05:
+            return [[0.0, 0.0], goal.tolist()]
+
+        # --- Parameters ------------------------------------------- #
+        N = self.params["eband_n_points"]
+        alpha_rep = self.params["eband_alpha_rep"]
+        alpha_smooth = self.params["eband_alpha_smooth"]
+        alpha_inertia = self.params["eband_alpha_inertia"]
+        n_inertia = self.params["eband_inertia_points"]
+        max_iters = self.params["eband_max_iters"]
+        max_kappa = self.params["eband_max_curvature"]
+        conv_thresh = self.params["eband_converge_thresh"]
+
+        # --- Robot heading in BEV coords -------------------------- #
+        # In robot frame the robot always faces +y, regardless of speed.
+        heading_dir = np.array([0.0, 1.0], dtype=np.float64)
+
+        # --- Grid geometry (mirrors get_safety_heatmap2) ---------- #
+        bev_range = self.params["bev_range_m"]
+        xlim = (-bev_range / 2.0, bev_range / 2.0)
+        ylim = (0.0, bev_range)
+        resolution = bev_range / 50.0
+
+        # --- Precompute gradient of safety grid ------------------- #
+        # np.gradient returns (d/d_row, d/d_col) = (d/dy, d/dx) in grid space.
+        gy_grid, gx_grid = np.gradient(self.grid)
+
+        # --- Initialise band -------------------------------------- #
+        if (self._current_traj is not None
+                and len(self._current_traj) >= 2):
+            seed = np.array(self._current_traj, dtype=np.float64)
+            band = self._reparameterize_equidistant(seed, N)
+        else:
+            band = np.linspace(np.array([0.0, 0.0]), goal, N)
+        # Pin endpoints
+        band[0] = [0.0, 0.0]
+        band[-1] = goal
+
+        # Start→goal unit direction (for monotonic ordering check)
+        sg_dir = goal / goal_dist
+
+        # --- Iterative optimisation ------------------------------- #
+        for _it in range(max_iters):
+            interior = band[1:-1]  # (N-2, 2), view
+
+            # 1. Repulsive force from safety gradient
+            grad = self._sample_gradient(
+                interior, gx_grid, gy_grid, xlim, ylim, resolution)
+            f_rep = alpha_rep * grad
+
+            # 2. Elastic (smoothing) force
+            f_smooth = alpha_smooth * (
+                band[:-2] + band[2:] - 2.0 * interior)
+
+            # 3. Inertia force — pull the first few points toward the
+            #    robot's current heading direction.  Each point i should
+            #    lie along origin + t_i * heading_dir, so the force is the
+            #    lateral error toward that ideal line.  Strength decays
+            #    linearly from full at point 1 to zero at n_inertia+1.
+            f_inertia = np.zeros_like(interior)
+            if alpha_inertia > 0:
+                k = min(n_inertia, len(interior))
+                for j in range(k):
+                    pt = band[j + 1]  # interior point j corresponds to band[j+1]
+                    # Project pt onto heading line through origin
+                    proj_len = np.dot(pt, heading_dir)
+                    proj_pt = proj_len * heading_dir
+                    # Force = vector from current position toward projected position
+                    weight = 1.0 - j / (k)  # linear decay
+                    f_inertia[j] = alpha_inertia * weight * (proj_pt - pt)
+
+            # 4. Update interior points
+            displacement = f_rep + f_smooth + f_inertia
+            band[1:-1] = interior + displacement
+
+            # --- Post-iteration constraints ----------------------- #
+            # Re-parameterize to equidistant spacing
+            band = self._reparameterize_equidistant(band, N)
+            band[0] = [0.0, 0.0]
+            band[-1] = goal
+
+            # Monotonic ordering along start→goal direction
+            for i in range(1, N - 1):
+                proj_prev = np.dot(band[i] - band[i - 1], sg_dir)
+                if proj_prev < 0:
+                    # Project back: place on line through band[i-1] at same
+                    # lateral offset but with non-negative forward progress
+                    perp = band[i] - band[i - 1] - proj_prev * sg_dir
+                    band[i] = band[i - 1] + perp  # zero forward step
+
+            # Curvature limiting
+            band = self._clamp_curvature(band, max_kappa)
+
+            # Convergence check
+            max_disp = np.max(np.hypot(displacement[:, 0], displacement[:, 1]))
+            if max_disp < conv_thresh:
+                break
+
+        return band.tolist()
+
+
 
     def _bezier(self, p0, p1, p2, p3, steps=50):
         """

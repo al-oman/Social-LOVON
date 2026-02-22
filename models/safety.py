@@ -12,7 +12,7 @@ import numpy as np
 # ------------------------------------------------------------------
 #  Safety parameters
 # ------------------------------------------------------------------
-SIGMA = 1.5    # Gaussian width (meters)
+SIGMA = 3.0    # Gaussian width (meters)
 H = 1.0        # peak danger at distance=0
 GAMMA =1.0   # trajectory discount factor
 
