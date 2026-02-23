@@ -87,8 +87,8 @@ class SocialNavigator:
     # ------------------------------------------------------------------ #
     DEFAULT_PARAMS = {
         # --- Action shield  params ---
-        "shield_thresh_on": 0.5,    # safety score below this → shield activates
-        "shield_thresh_off": 0.75,   # safety score above this → shield deactivates (hysteresis)
+        "shield_thresh_on": 1.0,    # safety score below this → shield activates
+        "shield_thresh_off": 1.5,   # safety score above this → shield deactivates (hysteresis)
         "shield_active_states": ["running"],  # mission states where shield is armed
         "mono_k": 300.0,
         "correction_gain": 25.0,
@@ -142,6 +142,7 @@ class SocialNavigator:
         "traj_gradient_gain": 0.5,     # how strongly the safety gradient nudges each step
         "traj_goal_gain": 0.3,         # attractive force toward goal during gradient walk
         "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
+        "max_traj_curvature": 1.0
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -2153,6 +2154,12 @@ class SocialNavigator:
             result = [p.tolist() for p in points]
             
 
+        # DEBUG: override with left-curving arc
+        result = []
+        R = 0.5
+        for i in range(60):
+            theta = i * 0.05
+            result.append([-R * (1 - math.cos(theta)), R * math.sin(theta)])
         return result
 
 
