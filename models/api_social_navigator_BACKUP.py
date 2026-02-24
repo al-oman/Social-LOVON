@@ -91,8 +91,8 @@ class SocialNavigator:
         "shield_thresh_off": 0.75,   # safety score above this → shield deactivates (hysteresis)
         "shield_active_states": ["running"],  # mission states where shield is armed
         "mono_k": 300.0,
-        # "correction_gain": 25.0,
-        # "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
+        "correction_gain": 25.0,
+        "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
         "max_omega_mag": 1.0,
         "k_vx_modulation": 2.0,
         # Robot pred
@@ -118,7 +118,7 @@ class SocialNavigator:
         "use_lidar_depth": True,       # True = use LiDAR for depth, False = monocular only
         "lidar_z_min": -0.3,          # meters, min Z in base frame (rejects ground ~-0.5)
         "lidar_z_max": 5.0,           # meters, max Z relative to sensor (above sensor)
-        # "lidar_angle_margin_deg": -5.0, # degrees, angular padding on bbox edges
+        "lidar_angle_margin_deg": -5.0, # degrees, angular padding on bbox edges
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
         "lidar_ema_alpha": 0.5,        # EMA smoothing factor (0..1); lower = smoother, higher = more responsive
         "lidar_depth_percentile": 50,  # percentile to find nearest returns (seed for cluster)
@@ -142,7 +142,7 @@ class SocialNavigator:
         "show_bezier_pts": False,      # draw Bezier control points on BEV
         # --- Gradient-walk trajectory ---
         "traj_step_size": 0.2,         # step size in meters for gradient walk
-        "traj_gradient_gain": 1.0,     # how strongly the safety gradient nudges each step
+        "traj_gradient_gain": 0.5,     # how strongly the safety gradient nudges each step
         "traj_goal_gain": 0.3,         # attractive force toward goal during gradient walk
         "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
         "max_traj_curvature": 1.0
@@ -1040,6 +1040,54 @@ class SocialNavigator:
         )
         return [vx_corrected, vy_corrected, omega_corrected]
     
+    # def _potential_field_correction(self):
+    #     """
+    #     Compute angular correction to steer toward safer areas.
+    #     Grid: robot at bottom-middle, y-axis points forward, x-axis points right
+    #     """
+    #     robot_i = 0  # bottom row
+    #     robot_j = self.grid.shape[1] // 2  # middle column
+        
+    #     # Compute gradient (points toward higher safety)
+    #     grad_y, grad_x = np.gradient(self.grid)
+        
+    #     # Safety gradient at robot position
+    #     safety_grad_x = grad_x[robot_i, robot_j]  # right is positive
+    #     safety_grad_y = grad_y[robot_i, robot_j]  # forward is positive
+        
+    #     # Convert to angular correction
+    #     # If danger on right (grad_x < 0), turn left (omega > 0)
+    #     # If danger on left (grad_x > 0), turn right (omega < 0)
+    #     omega_correction = -self.DEFAULT_PARAMS["correction_gain"] * safety_grad_x
+        
+    #     return omega_correction
+
+    # def _bezier_curve_correction(self, motion_vector):
+    #     if not self._best_traj or self._best_control_pts is None:
+    #         return 0.0
+
+    #     # Exact curvature at t=0 from the Bezier control points.
+    #     # For cubic Bezier B(t) with control points P0, P1, P2, P3:
+    #     #   B'(0)  = 3*(P1 - P0)
+    #     #   B''(0) = 6*(P0 - 2*P1 + P2)
+    #     #   kappa  = (dx'*dy'' - dy'*dx'') / (dx'^2 + dy'^2)^(3/2)
+    #     p0, p1, p2, p3 = self._best_control_pts
+    #     d1 = 3.0 * (p1 - p0)         # B'(0)
+    #     d2 = 6.0 * (p0 - 2*p1 + p2)  # B''(0)
+
+    #     speed_sq = d1[0]**2 + d1[1]**2
+    #     speed_cu = speed_sq * math.sqrt(speed_sq)
+    #     if speed_cu < 1e-9:
+    #         return 0.0
+
+    #     kappa_0 = (d1[0]*d2[1] - d1[1]*d2[0]) / speed_cu
+
+    #     v_fwd = motion_vector[0]
+    #     omega_desired = self.params["bezier_omega_gain"] * v_fwd * kappa_0
+    #     correction = omega_desired - motion_vector[2]
+
+    #     return min(correction, 1.0)
+
     def _omega_from_trajectory(self, motion_vector):
         """Compute the target omega from the curvature of the elastic-band trajectory.
 
@@ -1231,6 +1279,52 @@ class SocialNavigator:
         trajectory_score = float((seg_safety * seg_lengths).sum() / total_length)
         lowest_safety_val = float(safety.min())
         return trajectory_score, lowest_safety_val
+
+    # def _trajectory_similarity(self, traj1, traj2):
+    #     distances = 0.0
+    #     assert len(traj1) == len(traj2), "Trajectories must have the same number of points for similarity evaluation."
+    #     for p1, p2 in zip(traj1, traj2):
+    #         dist = np.linalg.norm(np.array(p1) - np.array(p2))
+    #         distances -= dist
+    #     return 1 / distances if distances != 0 else float('inf')
+    
+    # def _trajectory_similarity_v2(self, test_traj):
+    #     """
+    #     Infer the motion vector implied by test_traj and compare it to the
+    #     robot's current motion vector (self._motion_original).
+
+    #     The candidate motion vector is [v_x_original, v_y_original, omega_candidate],
+    #     where omega_candidate is estimated from the heading change across test_traj
+    #     (total delta_theta / horizon_s).  v_x and v_y are held fixed at the original
+    #     values since the trajectory search only varies curvature (omega), not speed.
+
+    #     Returns:
+    #         delta_omega (rad/s) -- angular rate difference between the candidate
+    #         trajectory and the robot's current command.  Lower = more similar.
+    #     """
+    #     if len(test_traj) < 2 or self._motion_original is None:
+    #         return float('inf')
+
+    #     pts = np.asarray(test_traj, dtype=np.float64)  # (S, 2)
+
+    #     # --- Infer omega from heading change across the trajectory ---
+    #     # In robot frame (+y = forward, +x = lateral), segment heading is
+    #     # atan2(dx, dy).  The robot starts facing +y so theta_0 ~ 0.
+    #     first_seg = pts[1]  - pts[0]   # early segment direction
+    #     last_seg  = pts[-1] - pts[-2]  # final segment direction
+
+    #     theta_0 = math.atan2(float(first_seg[0]), float(first_seg[1]))
+    #     theta_f = math.atan2(float(last_seg[0]),  float(last_seg[1]))
+
+    #     # Shortest angular distance in [-pi, pi]
+    #     delta_theta = (theta_f - theta_0 + math.pi) % (2 * math.pi) - math.pi
+
+    #     horizon_s = self.params["horizon_s"]
+    #     omega_candidate = delta_theta / horizon_s if horizon_s > 0.0 else 0.0
+
+    #     # --- Raw angular rate difference (rad/s) ---
+    #     omega_original = self._motion_original[2]
+    #     return abs(omega_candidate - omega_original)
 
     # ================================================================== #
     #  STAGE 8 -- Diagnostics                                             #
@@ -1484,6 +1578,54 @@ class SocialNavigator:
         else:
             logger.info("self.best_traj is None")
 
+        # -------------------Robot motion-vector curves-------------------
+        # path_tips = {}  # key: "original" or "corrected" -> (px, py)
+        # for vec, color, key in [
+        #     (self._motion_original,  (255, 0, 255),  "original"),
+        #     (self._motion_modulated, (0, 255, 255),  "corrected"),
+        # ]:
+        #     if vec is None:
+        #         continue
+        #     path = self._extrapolate_robot_path(vec)
+        #     prev = (rcx, rcy)
+        #     tip = prev
+        #     for pt in path:
+        #         px = int(rcx + pt[0] * scale)
+        #         py = int(rcy - pt[1] * scale)
+        #         if not (0 <= px < sz and 0 <= py < sz):
+        #             break
+        #         _cv2.line(bev, prev, (px, py), color, 2, _cv2.LINE_AA)
+        #         prev = (px, py)
+        #         tip = prev
+        #     path_tips[key] = tip
+        # ----------Correction arrow: original tip -> corrected tip (magenta)---------
+        # if self.shield_active and "original" in path_tips and "corrected" in path_tips:
+        #     o_tip = path_tips["original"]
+        #     c_tip = path_tips["corrected"]
+        #     if o_tip != c_tip:
+        #         _cv2.arrowedLine(bev, o_tip, c_tip,
+        #                          (255, 0, 255), 2, _cv2.LINE_AA, tipLength=0.3)
+
+        # # Bezier control points (white dots + dashed control polygon)
+        # if self.params["show_bezier_pts"] and self._best_control_pts is not None:
+        #     cp_px = []
+        #     for pt in self._best_control_pts:
+        #         cx_ = int(rcx + pt[0] * scale)
+        #         cy_ = int(rcy - pt[1] * scale)
+        #         cp_px.append((cx_, cy_))
+        #     # Control polygon (thin dashed-ish white lines)
+        #     for i in range(len(cp_px) - 1):
+        #         _cv2.line(bev, cp_px[i], cp_px[i + 1], (255, 255, 255), 1, _cv2.LINE_AA)
+        #     # Control points as circles with labels
+        #     labels = ["P0", "P1", "P2", "P3"]
+        #     for i, (cx_, cy_) in enumerate(cp_px):
+        #         if 0 <= cx_ < sz and 0 <= cy_ < sz:
+        #             _cv2.circle(bev, (cx_, cy_), 5, (255, 255, 255), -1)
+        #             _cv2.putText(bev, labels[i], (cx_ + 7, cy_ - 5),
+        #                          _cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+
+
         # -------------------Legend-------------------
         lx, ly = 10, sz - 75
         legend_items = [("Original", (255, 255, 0)),
@@ -1638,6 +1780,36 @@ class SocialNavigator:
         )
         return self.grid, extent
 
+    # Extrapolate robot path
+    # def _extrapolate_robot_path(self, motion_vector):
+    #     """
+    #     Extrapolate the robot's future path from its current motion vector.
+
+    #     Uses the same unicycle integration as draw_bev lines 885-906.
+    #     Returns a list of [x, y] positions in robot frame (robot starts at origin).
+
+    #     Args:
+    #         motion_vector: [v_forward, v_lateral, omega_z]
+
+    #     Returns:
+    #         list of [x, y] points in robot frame
+    #     """
+    #     horizon = self.params["horizon_s"]
+    #     steps = self.params["horizon_steps"]
+    #     if steps <= 0:
+    #         return []
+    #     dt = horizon / steps
+
+    #     v_forward, v_lateral, omega = motion_vector[0], motion_vector[1], motion_vector[2]
+    #     x, y, theta = 0.0, 0.0, 0.0
+    #     path = []
+    #     for _ in range(steps):
+    #         x += (-v_forward * math.sin(theta) - v_lateral * math.cos(theta)) * dt
+    #         y += (v_forward * math.cos(theta) + v_lateral * math.sin(theta)) * dt
+    #         theta += omega * dt
+    #         path.append([x, y])
+    #     return path
+
     def _extrapolate_robot_trajectory(self, motion_vector):
         """
         bezier with limited number of steps
@@ -1670,7 +1842,173 @@ class SocialNavigator:
         p2 = p3 + p1p3*(1/3)
 
         full_traj = self._bezier(p0, p1, p2, p3, steps=steps)
-        return full_traj
+
+        return full_traj[:steps]
+
+    # def _extrapolate_robot_path_full(self, motion_vector, steps=50):
+    #     """
+    #     Cubic Bezier curve from robot to goal.
+
+    #     The curve starts tangent to the current motion_vector direction and
+    #     arrives at the goal with decreasing curvature (tight turn early,
+    #     straightening out toward the end).
+
+    #     Tunable via self.params["path_curvature"]:
+    #         0.0 → straight line to goal
+    #         1.0 → default (tangent handle = 1/3 of goal distance)
+    #         >1  → exaggerated initial arc
+
+    #     Args:
+    #         motion_vector: [v_forward, v_lateral, omega_z]
+    #         steps:         number of samples along the curve
+
+    #     Returns:
+    #         list of [x, y] points in BEV robot frame
+    #     """
+    #     if self._goal_rf is None:
+    #         return []
+
+    #     curvature = self.params.get("path_curvature", 0.5)
+
+    #     # P0: robot at origin
+    #     p0 = np.array([0.0, 0.0])
+
+    #     # P3: goal in BEV coords [x_lateral, depth]
+    #     p3 = np.array([self._goal_rf[0], self._goal_rf[1]])
+
+    #     goal_dist = np.linalg.norm(p3)
+    #     if goal_dist < 0.05:
+    #         return []
+
+    #     # Robot heading is always forward in robot frame
+    #     heading = np.array([0.0, 1.0])
+
+    #     # P1: extend along initial heading (controls departure curvature)
+    #     tangent_len = curvature * goal_dist / 2.0
+    #     p1 = p0 + heading * tangent_len
+    #     p1p3 = p1 - p3
+    #     # P2: pull back from goal along direction from p1
+    #     p2 = p3 + p1p3*(1/3)
+
+    #     return self._bezier(p0, p1, p2, p3, steps=steps)
+    
+    # def _construct_bezier(self, x_offset, steps=50):
+    #     if self._goal_rf is None:
+    #         return [], None
+
+    #     # P3: goal in BEV coords [x_lateral, depth]
+    #     x_lat, depth = self._goal_rf[0], self._goal_rf[1]
+    #     p3 = np.array([x_lat, depth])
+
+    #     goal_dist = np.linalg.norm(p3)
+    #     if goal_dist < 0.05:
+    #         return [], None
+
+    #     curvature = self.params.get("path_curvature", 0.5)
+
+    #     # Robot heading is always forward in robot frame
+    #     heading = np.array([0.0, 1.0])
+    #     p0 = np.array([0.0, 0.0])
+    #     p1 = p0 + heading * curvature * goal_dist /3
+
+    #     # p2 direction logic
+    #     p1p3 = p1 - p3
+    #     p2 = p3 - np.array([x_offset, depth * (1/5)])
+
+    #     # Evaluate cubic Bezier
+    #     curve_points = self._bezier(p0, p1, p2, p3, steps=steps)
+    #     return curve_points, (p0, p1, p2, p3)
+
+    # -------------------------------------------------------------- #
+    #  Elastic-band helpers                                          #
+    # -------------------------------------------------------------- #
+
+    # @staticmethod
+    # def _reparameterize_equidistant(traj, n_points):
+    #     """Redistribute *n_points* equidistantly along the arc of *traj*.
+
+    #     Args:
+    #         traj: (M, 2) ndarray of waypoints.
+    #         n_points: desired output count (>= 2).
+
+    #     Returns:
+    #         (n_points, 2) ndarray with first/last points preserved.
+    #     """
+    #     diffs = np.diff(traj, axis=0)
+    #     seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
+    #     cum = np.concatenate(([0.0], np.cumsum(seg_lens)))
+    #     total = cum[-1]
+    #     if total < 1e-9:
+    #         # Degenerate — all points coincide; return linspace between endpoints
+    #         return np.linspace(traj[0], traj[-1], n_points)
+    #     target = np.linspace(0.0, total, n_points)
+    #     new_pts = np.empty((n_points, 2))
+    #     new_pts[0] = traj[0]
+    #     new_pts[-1] = traj[-1]
+    #     for i in range(1, n_points - 1):
+    #         idx = np.searchsorted(cum, target[i], side='right') - 1
+    #         idx = min(idx, len(traj) - 2)
+    #         frac = (target[i] - cum[idx]) / max(seg_lens[idx], 1e-12)
+    #         new_pts[i] = traj[idx] + frac * diffs[idx]
+    #     return new_pts
+
+    # @staticmethod
+    # def _clamp_curvature(traj, max_kappa, max_passes=10, start_idx=1):
+    #     """Hard-limit Menger curvature by blending Q toward the P-R line.
+
+    #     For each violating triple (P, Q, R), Q is moved toward the midpoint
+    #     of P and R (i.e. flattened) using a binary search to find the exact
+    #     blend factor that produces curvature == max_kappa.  Multi-pass
+    #     iteration handles cascading corrections.
+    #     """
+    #     for _ in range(max_passes):
+    #         any_violation = False
+    #         for i in range(start_idx, len(traj) - 1):
+    #             P = traj[i - 1]
+    #             Q = traj[i]
+    #             R = traj[i + 1]
+
+    #             a = Q - P
+    #             b = R - Q
+    #             la = np.linalg.norm(a)
+    #             lb = np.linalg.norm(b)
+    #             lc = np.linalg.norm(R - P)
+    #             if la < 1e-9 or lb < 1e-9 or lc < 1e-9:
+    #                 continue
+
+    #             cross = a[0] * b[1] - a[1] * b[0]
+    #             kappa = 2.0 * abs(cross) / (la * lb * lc)
+    #             if kappa <= max_kappa:
+    #                 continue
+
+    #             any_violation = True
+
+    #             # Binary search: blend Q toward the P-R midpoint until
+    #             # curvature == max_kappa.  t=0 keeps Q, t=1 is on the line.
+    #             M = 0.5 * (P + R)
+    #             lo, hi = 0.0, 1.0
+    #             for _ in range(20):
+    #                 t = 0.5 * (lo + hi)
+    #                 Qt = Q + t * (M - Q)
+    #                 at = Qt - P
+    #                 bt = R - Qt
+    #                 lat = np.linalg.norm(at)
+    #                 lbt = np.linalg.norm(bt)
+    #                 if lat < 1e-9 or lbt < 1e-9:
+    #                     lo = t
+    #                     continue
+    #                 ct = a[0] * b[1] - a[1] * b[0]  # cross doesn't change direction
+    #                 ct = at[0] * bt[1] - at[1] * bt[0]
+    #                 kt = 2.0 * abs(ct) / (lat * lbt * lc)
+    #                 if kt > max_kappa:
+    #                     lo = t
+    #                 else:
+    #                     hi = t
+    #             traj[i] = Q + lo * (M - Q)
+
+    #         if not any_violation:
+    #             break
+    #     return traj
 
     @staticmethod
     def _sample_gradient(pts, grad_x, grad_y, xlim, ylim, x_res, y_res=None):

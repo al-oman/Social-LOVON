@@ -12,7 +12,7 @@ import numpy as np
 # ------------------------------------------------------------------
 #  Safety parameters
 # ------------------------------------------------------------------
-SIGMA = 1.5    # Gaussian width (meters)
+SIGMA = 2.0    # Gaussian width (meters)
 H = 1.0        # peak danger at distance=0
 GAMMA =1.0   # trajectory discount factor
 
@@ -58,10 +58,13 @@ def _trajectory_grid(X, Y, human_predicted_paths, sigma=SIGMA, h=H):
 
 
 def _safety_scores(X, Y, human_positions,
-                   human_predicted_paths=None, sigma=SIGMA, h=H):
+                   human_predicted_paths=None, sigma=SIGMA, h=H, human_traj_pred=True):
     """Combined safety. X, Y can be any broadcastable shape."""
     s_gauss = _gaussian_grid(X, Y, human_positions, sigma, h)
-    s_traj = _trajectory_grid(X, Y, human_predicted_paths, sigma, h)
+    if human_traj_pred:
+        s_traj = _trajectory_grid(X, Y, human_predicted_paths, sigma, h)
+    else:
+        s_traj = np.ones_like(s_gauss)
     np.minimum(s_gauss, s_traj, out=s_gauss)
     np.clip(s_gauss, 0.0, 1.0, out=s_gauss)
     return s_gauss
@@ -72,34 +75,43 @@ def _safety_scores(X, Y, human_positions,
 # ------------------------------------------------------------------
 
 def safety_score_at_point(point_x, point_y, human_positions,
-                          human_predicted_paths=None, sigma=SIGMA, h=H):
+                          human_predicted_paths=None, sigma=SIGMA, h=H, human_traj_pred=True):
     """Safety score at a single (x, y). Returns float in [0, 1]."""
     result = _safety_scores(
         np.float64(point_x), np.float64(point_y),
-        human_positions, human_predicted_paths, sigma, h)
+        human_positions, human_predicted_paths, sigma, h, human_traj_pred)
     return float(result)
 
 
 def compute_safety_grid(human_positions, xlim, ylim, resolution=0.1,
-                        human_predicted_paths=None, sigma=SIGMA, h=H):
-    """Vectorized 2D safety field. Returns (grid, extent)."""
-    x = np.arange(xlim[0], xlim[1], resolution)
-    y = np.arange(ylim[0], ylim[1], resolution)
+                        human_predicted_paths=None, sigma=SIGMA, h=H,
+                        num_cells=None, human_traj_pred=True):
+    """Vectorized 2D safety field. Returns (grid, extent).
+
+    If *num_cells* is given, both axes use exactly that many cells
+    (producing a square grid).  Otherwise falls back to *resolution*.
+    """
+    if num_cells is not None:
+        x = np.linspace(xlim[0], xlim[1], num_cells)
+        y = np.linspace(ylim[0], ylim[1], num_cells)
+    else:
+        x = np.arange(xlim[0], xlim[1], resolution)
+        y = np.arange(ylim[0], ylim[1], resolution)
     X, Y = np.meshgrid(x, y)
 
     safety = _safety_scores(X, Y, human_positions,
-                            human_predicted_paths, sigma, h)
+                            human_predicted_paths, sigma, h, human_traj_pred)
 
     extent = [xlim[0], xlim[1], ylim[0], ylim[1]]
     return safety, extent
 
 
 def robot_safety_score(robot_x, robot_y, human_positions,
-                       human_predicted_paths=None, sigma=SIGMA, h=H):
+                       human_predicted_paths=None, sigma=SIGMA, h=H, human_traj_pred=True):
     """Safety score at the robot's current position. Returns float in [0, 1]."""
     return safety_score_at_point(robot_x, robot_y, human_positions,
                                 human_predicted_paths=human_predicted_paths,
-                                sigma=sigma, h=h)
+                                sigma=sigma, h=h, human_traj_pred=human_traj_pred)
 
 
 

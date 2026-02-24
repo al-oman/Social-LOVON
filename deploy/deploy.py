@@ -422,7 +422,7 @@ class MotionControlThread(threading.Thread):
             # Capture planned Bezier trajectory on first tick with a goal
             if c._planned_trajectory_world is None and c.social_nav._goal_rf is not None:
                 robot_state = c.crowdnav_provider.robot.get_full_state()
-                path_rf = c.social_nav._extrapolate_robot_path_full(c.motion_vector)
+                path_rf = c.social_nav._extrapolate_robot_trajectory(c.motion_vector)
                 if path_rf:
                     cos_t = math.cos(robot_state.theta)
                     sin_t = math.sin(robot_state.theta)
@@ -467,7 +467,8 @@ class VisualLanguageController:
                  socialnav_enabled=False,
                  network_device="enp8s0",
                  crowdnav_sim_mode=False,
-                 robot_theta=None):
+                 robot_theta=None,
+                 human_traj_pred=True):
         # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.object_extractor = SequenceToSequenceClassAPI(
@@ -496,6 +497,7 @@ class VisualLanguageController:
         self.network_device = network_device
         self.crowdnav_sim_mode = crowdnav_sim_mode
         self.robot_theta = robot_theta
+        self.human_traj_pred = human_traj_pred
 
         # Initialize RealSense camera if selected
         # if self.camera_type == "realsense":
@@ -585,6 +587,7 @@ class VisualLanguageController:
             sn_kwargs["lidar_cam_pitch_offset"] = 0.0
             sn_kwargs["lidar_cam_yaw_offset"] = 0.0
             sn_kwargs["mono_k"] = self.crowdnav_provider._fx * 0.3  # match goal_size_m in _generate_synthetic_object_state
+            sn_kwargs["human_traj_pred"] = self.human_traj_pred
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
         # self.lidar_window = LidarWindowSide()
@@ -671,7 +674,7 @@ class VisualLanguageController:
 
         # Mission instruction input area
         initial_instructions = [
-            "move to the handbag at speed of 0.5 m/s"
+            "move to the handbag at speed of 1.0 m/s"
             # "move to the person at speed of 0.7 m/s",
             # "Run to the human at speed of 0.5 m/s",
             # "run to the chair at speed of 0.4 m/s",
@@ -1055,7 +1058,9 @@ class VisualLanguageController:
             "mission_instruction_1": self.mission_instruction_1,
             **state
         }
+        t0 = time.perf_counter()
         prediction = self.motion_predictor.predict(input_data)
+        # print(f"inference_speed: {time.perf_counter()-t0}")
         self.state["mission_state_in"] = prediction["predicted_state"]
         self.state["search_state_in"] = prediction["search_state"]
         self.motion_vector = prediction["motion_vector"]
@@ -1363,8 +1368,11 @@ if __name__ == "__main__":
                 help='Initial robot heading in radians (crowdnav_sim_mode, default: pi/2)')
     parser.add_argument('--show_bezier_pts', action='store_true', default=False,
                 help='Display Bezier control points on BEV and CrowdNav views')
+    parser.add_argument('--disable_human_traj_pred', action='store_true', default=False,
+                help='Disable human trajectory prediction, use only gaussian for safety calculation')
     args = parser.parse_args()
 
+    human_traj_pred = not args.disable_human_traj_pred
     # Initialize and run controller
     controller = VisualLanguageController(
         yolo_model_dir=args.yolo_model_dir,
@@ -1383,7 +1391,8 @@ if __name__ == "__main__":
         socialnav_enabled=args.socialnav_enabled,
         network_device=args.network_device, 
         crowdnav_sim_mode=args.crowdnav_sim_mode,
-        robot_theta=args.robot_theta
+        robot_theta=args.robot_theta,
+        human_traj_pred=human_traj_pred
     )
     controller.run()
     print("Program terminated.")
