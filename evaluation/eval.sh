@@ -8,6 +8,8 @@
 #    - human_num
 #    - human v_pref (speed)
 #    - human policy (orca / linear)
+#    - human traj prediction enabled / disabled
+#    - robot speed (via mission instruction)
 #
 #  Each combination gets a temporary env config with the parameter
 #  overrides, then runs deploy_headless.py --headless.
@@ -31,16 +33,18 @@ ROBOT_THETAS=(1.5708 0.7854 3.1416)                 # pi/2, pi/4, pi  (radians)
 HUMAN_NUMS=(1 2 3 5)
 HUMAN_SPEEDS=(0.5 1.0 1.5)                          # v_pref (m/s)
 HUMAN_POLICIES=("orca" "linear")
+TRAJ_PRED_FLAGS=("" "--disable_human_traj_pred")    # enabled / disabled
+ROBOT_SPEEDS=(0.5 1.0)                              # robot commanded speed (m/s)
 
 # ── Per-run settings ──
 NUM_EPISODES=10
 MAX_STEPS=500
-MISSION="move to the handbag at speed of 0.5 m/s"
 
-# ── Output directory ──
+# ── Output CSV ──
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 RESULTS_DIR="$SCRIPT_DIR/results/$TIMESTAMP"
 mkdir -p "$RESULTS_DIR"
+CSV_PATH="$RESULTS_DIR/eval_results.csv"
 
 # ── Helper: generate a temporary env config with overrides ──
 make_env_config() {
@@ -62,7 +66,7 @@ make_env_config() {
 
 # ── Sweep ──
 RUN=0
-TOTAL=$(( ${#SOCIALNAV_FLAGS[@]} * ${#ROBOT_THETAS[@]} * ${#HUMAN_NUMS[@]} * ${#HUMAN_SPEEDS[@]} * ${#HUMAN_POLICIES[@]} ))
+TOTAL=$(( ${#SOCIALNAV_FLAGS[@]} * ${#ROBOT_THETAS[@]} * ${#HUMAN_NUMS[@]} * ${#HUMAN_SPEEDS[@]} * ${#HUMAN_POLICIES[@]} * ${#TRAJ_PRED_FLAGS[@]} * ${#ROBOT_SPEEDS[@]} ))
 
 echo "============================================================"
 echo "  Social-LOVON evaluation sweep"
@@ -76,40 +80,42 @@ for SOCIALNAV in "${SOCIALNAV_FLAGS[@]}"; do
         for NHUMANS in "${HUMAN_NUMS[@]}"; do
             for SPEED in "${HUMAN_SPEEDS[@]}"; do
                 for HPOLICY in "${HUMAN_POLICIES[@]}"; do
+                    for TRAJPRED in "${TRAJ_PRED_FLAGS[@]}"; do
+                        for RSPEED in "${ROBOT_SPEEDS[@]}"; do
 
-                    RUN=$((RUN + 1))
-                    SN_LABEL=$( [[ -n "$SOCIALNAV" ]] && echo "on" || echo "off" )
-                    TAG="sn${SN_LABEL}_theta${THETA}_h${NHUMANS}_spd${SPEED}_${HPOLICY}"
+                            RUN=$((RUN + 1))
+                            SN_LABEL=$( [[ -n "$SOCIALNAV" ]] && echo "on" || echo "off" )
+                            TP_LABEL=$( [[ -z "$TRAJPRED" ]] && echo "tpOn" || echo "tpOff" )
+                            TAG="sn${SN_LABEL}_theta${THETA}_h${NHUMANS}_hspd${SPEED}_${HPOLICY}_${TP_LABEL}_rspd${RSPEED}"
 
-                    echo "────────────────────────────────────────────────────"
-                    echo "  [${RUN}/${TOTAL}]  ${TAG}"
-                    echo "────────────────────────────────────────────────────"
+                            MISSION="move to the handbag at speed of ${RSPEED} m/s"
 
-                    # Generate temp config
-                    TMP_CONFIG=$(make_env_config "$NHUMANS" "$SPEED" "$HPOLICY")
+                            PCT=$(( 100 * (RUN - 1) / TOTAL ))
+                            echo "────────────────────────────────────────────────────"
+                            echo "  [${RUN}/${TOTAL}] (${PCT}%)  ${TAG}"
+                            echo "────────────────────────────────────────────────────"
 
-                    # Run headless evaluation
-                    python "$DEPLOY" \
-                        --headless \
-                        --num_episodes "$NUM_EPISODES" \
-                        --max_steps "$MAX_STEPS" \
-                        --mission_instruction "$MISSION" \
-                        --robot_theta "$THETA" \
-                        --env_config "$TMP_CONFIG" \
-                        --policy_config "$POLICY_CONFIG" \
-                        $SOCIALNAV
+                            # Generate temp config
+                            TMP_CONFIG=$(make_env_config "$NHUMANS" "$SPEED" "$HPOLICY")
 
-                    # Move the generated CSV into results dir with descriptive name
-                    # deploy_headless.py writes eval_results_<ts>.csv in cwd
-                    LATEST_CSV=$(ls -t eval_results_*.csv 2>/dev/null | head -1)
-                    if [[ -n "$LATEST_CSV" ]]; then
-                        mv "$LATEST_CSV" "$RESULTS_DIR/${TAG}.csv"
-                    fi
+                            # Run headless evaluation
+                            python "$DEPLOY" \
+                                --headless \
+                                --num_episodes "$NUM_EPISODES" \
+                                --max_steps "$MAX_STEPS" \
+                                --csv_path "$CSV_PATH" \
+                                --mission_instruction "$MISSION" \
+                                --robot_theta "$THETA" \
+                                --env_config "$TMP_CONFIG" \
+                                --policy_config "$POLICY_CONFIG" \
+                                $SOCIALNAV $TRAJPRED
 
-                    # Clean up temp config
-                    rm -f "$TMP_CONFIG"
+                            # Clean up temp config
+                            rm -f "$TMP_CONFIG"
 
-                    echo ""
+                            echo ""
+                        done
+                    done
                 done
             done
         done
@@ -118,5 +124,5 @@ done
 
 echo "============================================================"
 echo "  Sweep complete.  ${TOTAL} runs finished."
-echo "  Results saved to: ${RESULTS_DIR}"
+echo "  Results saved to: ${CSV_PATH}"
 echo "============================================================"

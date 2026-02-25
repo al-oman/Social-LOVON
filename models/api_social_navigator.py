@@ -94,10 +94,16 @@ class SocialNavigator:
         # "correction_gain": 25.0,
         # "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
         "max_omega_mag": 1.0,
-        "k_vx_modulation": 2.0,
+        "vx_sfm_gain": 2.0,
+        "vy_sfm_gain": 1.0,
+        "traj_step_size": 0.2,         # step size in meters for gradient walk
+        "traj_gradient_gain": 1.0,     # how strongly the safety gradient nudges each step
+        "traj_goal_gain": 0.3,         # attractive force toward goal during gradient walk
+        "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
+        "max_traj_curvature": 1.0,
         # Robot pred
         "horizon_s": 2.0,
-        "horizon_steps": 50,
+        "horizon_steps": 10,
         "path_curvature": 0.45,       # tuned so that predicted robot trajectory matches real one  
         # --- Camera params  ---
         "image_width": 640,
@@ -106,7 +112,7 @@ class SocialNavigator:
         "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
         # --- Human Trajectory prediction ---
         "human_pred_history_steps": 25,
-        # "human_pred_s": 2.0,
+        "human_pred_s": 3.0,
         "human_pred_steps": 25,
         "pred_interval": 1,    # predict every frame
         # --- ByteTrack tracker ---
@@ -139,13 +145,7 @@ class SocialNavigator:
         # --- Ghost humans (out-of-FOV persistence) ---
         "ghost_max_frames": 400,       # max frames a ghost persists (~30s at 4 Hz)
         # --- Debug / visualisation ---
-        "show_bezier_pts": False,      # draw Bezier control points on BEV
-        # --- Gradient-walk trajectory ---
-        "traj_step_size": 0.2,         # step size in meters for gradient walk
-        "traj_gradient_gain": 1.0,     # how strongly the safety gradient nudges each step
-        "traj_goal_gain": 0.3,         # attractive force toward goal during gradient walk
-        "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
-        "max_traj_curvature": 1.0
+        "show_bezier_pts": False      # draw Bezier control points on BEV
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -166,9 +166,12 @@ class SocialNavigator:
         self._byte_tracks = []     # type: List[dict]  # internal ByteTrack state
 
         # --- Trajectory predictor ---
+        pred_steps = max(1, int(round(
+            self.params["human_pred_s"] / self.params["time_step"]
+        )))
         self._predictor = HumanTrajectoryPredictor(
             history_length=self.params["human_pred_history_steps"],
-            prediction_steps=self.params["human_pred_steps"],
+            prediction_steps=pred_steps,
             prediction_interval=self.params["pred_interval"],
         )
         self._frame_count = 0
@@ -1031,7 +1034,9 @@ class SocialNavigator:
         omega_corrected = max(-max_omega, min(omega_corrected, max_omega))
 
         vx_corrected = self._vx_sfm_correction(motion_vector)
-        print(f"corrected vx: {vx_corrected}")
+        # print(f"corrected vx: {vx_corrected}")
+        # vy_corrected = self._vy_sfm_correction(motion_vector)
+        # print(f"corrected vy: {vy_corrected}")
         vy_corrected = vy
 
         logger.info(
@@ -1090,7 +1095,7 @@ class SocialNavigator:
         if self.grid is None or not self.shield_active:
             return vx
 
-        k = self.params["k_vx_modulation"]
+        k = self.params["vx_sfm_gain"]
 
         # Sample safety gradient at the robot (origin)
         bev_range = self.params["bev_range_m"]
@@ -1123,6 +1128,45 @@ class SocialNavigator:
             vx = vx * max(0.0, 1.0 + k * grad_parallel)
 
         return vx
+    
+    def _vy_sfm_correction(self, motion_vector):
+        """Add lateral nudge from the safety gradient perpendicular to motion."""
+        vy = motion_vector[1]
+        if self.grid is None or not self.shield_active:
+            return vy
+
+        k = self.params["vy_sfm_gain"]
+
+        # Sample safety gradient at the robot (origin)
+        bev_range = self.params["bev_range_m"]
+        bev_behind = self.params["bev_behind_m"]
+        total = bev_range + bev_behind
+        xlim = (-total / 2.0, total / 2.0)
+        ylim = (-bev_behind, bev_range)
+        N = self.params["safety_heatmap_num_grid"]
+        x_res = (xlim[1] - xlim[0]) / max(N - 1, 1)
+        y_res = (ylim[1] - ylim[0]) / max(N - 1, 1)
+
+        gy_grid, gx_grid = np.gradient(self.grid)
+        grad = self._sample_gradient(
+            np.array([[0.0, 0.0]]), gx_grid, gy_grid, xlim, ylim, x_res, y_res
+        )[0]  # [gx, gy] in BEV, points toward higher safety
+
+        # Direction of motion in BEV: [lateral, forward]
+        motion_dir = np.array([motion_vector[1], motion_vector[0]])
+        speed = np.linalg.norm(motion_dir)
+        if speed < 1e-6:
+            return vy
+
+        motion_unit = motion_dir / speed
+
+        # Perpendicular component of gradient (project out the parallel part)
+        grad_perp = grad - np.dot(grad, motion_unit) * motion_unit
+
+        # Take the lateral (BEV x-axis) component as the vy correction
+        vy += k * grad_perp[0]
+
+        return vy
 
     def _get_best_traj(self, traj_type="elastic"):
         """Build an elastic-band trajectory and return it with its safety score."""
@@ -1136,6 +1180,7 @@ class SocialNavigator:
         t_start = time.perf_counter()
 
         curve = self._construct_trajectory()
+        # print(curve, "\n")
         if len(curve) < 2:
             return [], 0.0
 
@@ -1263,13 +1308,13 @@ class SocialNavigator:
         if self._goal_rf is not None:
             try:
                 best_traj, best_score = self._get_best_traj(traj_type="elastic")
-                self._best_traj = best_traj if best_traj else (self._current_traj or None)
+                self._best_traj = best_traj if best_traj else None
                 # self._best_control_pts = best_cp
                 self._best_traj_score = best_score
             except Exception as e:
                 logger.error("_update_trajectory_data _get_best_traj FAILED: %s", e, exc_info=True)
         else:
-            self._best_traj = self._current_traj
+            self._best_traj = None
             self._best_control_pts = None
             self._best_traj_score = self._current_traj_score
 

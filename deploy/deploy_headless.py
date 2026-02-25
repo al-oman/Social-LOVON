@@ -91,6 +91,7 @@ def _import_headless_deps():
 from models.api_object_extraction import SequenceToSequenceClassAPI
 from models.api_language2mostion import MotionPredictor
 from models.api_social_navigator import SocialNavigator
+from crowd_sim.envs.utils.info import Collision, Danger, ReachGoal, Timeout
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -154,6 +155,7 @@ class HeadlessRunner:
             "lidar_cam_pitch_offset": 0.0,
             "lidar_cam_yaw_offset": 0.0,
             "mono_k": self.crowdnav_provider._fx * 0.3,
+            "human_traj_pred": not args.disable_human_traj_pred,
         }
         self.social_nav = SocialNavigator(
             enabled=args.socialnav_enabled, **sn_kwargs
@@ -179,11 +181,40 @@ class HeadlessRunner:
         max_steps = self.args.max_steps
         t0 = time.perf_counter()
 
+        # Per-episode near-miss accumulators
+        collision = False
+        min_distance_episode = float('inf')
+        danger_count = 0
+        termination_reason = "max_steps"
+
         while step_count < max_steps:
             synthetic = self.crowdnav_provider.step(self.motion_vector)
             if synthetic is None:
                 break
             step_count += 1
+
+            # Track near-miss metrics from CrowdNav info
+            info = synthetic["info"]
+            if isinstance(info, Collision):
+                collision = True
+                termination_reason = "collision"
+            elif isinstance(info, Danger):
+                danger_count += 1
+            elif isinstance(info, ReachGoal):
+                termination_reason = "goal"
+            elif isinstance(info, Timeout):
+                termination_reason = "timeout"
+
+            # Compute true min distance from robot/human positions
+            robot_state = self.crowdnav_provider.robot.get_full_state()
+            humans = self.crowdnav_provider.env.humans
+            if humans:
+                dmin_step = min(
+                    np.hypot(h.px - robot_state.px, h.py - robot_state.py)
+                    - h.radius - robot_state.radius
+                    for h in humans
+                )
+                min_distance_episode = min(min_distance_episode, dmin_step)
 
             # Update controller state from synthetic data
             self.pose_state = synthetic["pose_state"]
@@ -210,6 +241,10 @@ class HeadlessRunner:
             "final_goal_dist": goal_dist,
             "final_px": robot.px,
             "final_py": robot.py,
+            "collision": collision,
+            "min_distance": min_distance_episode,
+            "danger_count": danger_count,
+            "termination_reason": termination_reason,
         }
 
     # ------------------------------------------------------------------ #
@@ -254,33 +289,65 @@ class HeadlessRunner:
         for ep in range(num_episodes):
             res = self._run_episode(ep)
             results.append(res)
-            status = "GOAL" if res["reached_goal"] else "FAIL"
+            status = "GOAL" if res["reached_goal"] else ("COLL" if res["collision"] else "FAIL")
             print(
                 f"  [{ep+1}/{num_episodes}] {status}  "
                 f"steps={res['steps']}  sim_t={res['sim_time']:.2f}s  "
-                f"wall={res['time_s']:.3f}s  goal_dist={res['final_goal_dist']:.3f}"
+                f"wall={res['time_s']:.3f}s  goal_dist={res['final_goal_dist']:.3f}  "
+                f"dmin={res['min_distance']:.3f}  danger={res['danger_count']}"
             )
 
         batch_elapsed = time.perf_counter() - batch_t0
 
         # ── Summary ──
         goals = sum(1 for r in results if r["reached_goal"])
+        collisions = sum(1 for r in results if r["collision"])
+        avg_min_dist = np.mean([r["min_distance"] for r in results]) if results else 0
+        avg_danger = np.mean([r["danger_count"] for r in results]) if results else 0
         print(f"\n{'='*60}")
-        print(f"  Episodes: {num_episodes}")
-        print(f"  Success:  {goals}/{num_episodes}  ({100*goals/max(num_episodes,1):.1f}%)")
+        print(f"  Episodes:   {num_episodes}")
+        print(f"  Success:    {goals}/{num_episodes}  ({100*goals/max(num_episodes,1):.1f}%)")
+        print(f"  Collisions: {collisions}/{num_episodes}  ({100*collisions/max(num_episodes,1):.1f}%)")
+        print(f"  Avg min distance: {avg_min_dist:.3f} m")
+        print(f"  Avg danger count: {avg_danger:.1f} steps/episode")
         print(f"  Wall time: {batch_elapsed:.2f}s  "
               f"({batch_elapsed/max(num_episodes,1):.3f}s / episode)")
         print(f"{'='*60}")
 
-        # ── Save CSV ──
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_path = f"eval_results_{ts}.csv"
-        if results:
-            with open(csv_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=results[0].keys())
+        # ── Append batch summary row to CSV ──
+        csv_path = self.args.csv_path
+        avg_steps = np.mean([r["steps"] for r in results]) if results else 0
+        avg_sim_time = np.mean([r["sim_time"] for r in results]) if results else 0
+        avg_goal_dist = np.mean([r["final_goal_dist"] for r in results]) if results else 0
+
+        # Read env config params for the CSV row
+        env_cfg = self.crowdnav_provider.env.config
+        batch_row = {
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "num_episodes": num_episodes,
+            "socialnav_enabled": self.args.socialnav_enabled,
+            "human_traj_pred": not self.args.disable_human_traj_pred,
+            "robot_theta": self.args.robot_theta,
+            "human_num": env_cfg.getint("sim", "human_num"),
+            "human_v_pref": env_cfg.getfloat("humans", "v_pref"),
+            "human_policy": env_cfg.get("humans", "policy"),
+            "mission_instruction": self.args.mission_instruction,
+            "success_rate": goals / max(num_episodes, 1),
+            "collision_rate": collisions / max(num_episodes, 1),
+            "avg_min_distance": avg_min_dist,
+            "avg_danger_count": avg_danger,
+            "avg_steps": avg_steps,
+            "avg_sim_time": avg_sim_time,
+            "avg_goal_dist": avg_goal_dist,
+            "wall_time": batch_elapsed,
+        }
+        file_exists = os.path.isfile(csv_path)
+        with open(csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=batch_row.keys())
+            if not file_exists:
                 writer.writeheader()
-                writer.writerows(results)
-            print(f"Results saved to {csv_path}")
+            writer.writerow(batch_row)
+        print(f"Batch summary appended to {csv_path}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -343,6 +410,8 @@ if __name__ == "__main__":
                         help="Number of episodes to run (headless only)")
     parser.add_argument("--max_steps", type=int, default=500,
                         help="Max sim steps per episode before timeout")
+    parser.add_argument("--csv_path", type=str, default="eval_results.csv",
+                        help="Path to append batch summary rows to")
     parser.add_argument("--mission_instruction", type=str,
                         default="move to the handbag at speed of 0.5 m/s",
                         help="Mission instruction for all episodes")
@@ -382,6 +451,8 @@ if __name__ == "__main__":
     parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config')
     parser.add_argument('--robot_theta', type=float, default=None)
     parser.add_argument('--show_bezier_pts', action='store_true', default=False)
+    parser.add_argument('--disable_human_traj_pred', action='store_true', default=False,
+                        help='Disable human trajectory prediction, use only gaussian for safety calculation')
 
     args = parser.parse_args()
 

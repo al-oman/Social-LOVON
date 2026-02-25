@@ -1,0 +1,2 @@
+timestamp,num_episodes,success_rate,collision_rate,avg_min_distance,avg_danger_count,avg_steps,avg_sim_time,avg_goal_dist,wall_time,socialnav_enabled,human_traj_pred,mission_instruction
+2026-02-24 18:43:18,10,1.0,0.0,0.14960677476009437,4.5,36.0,7.200000000000005,0.26713131687287284,0.8281362239504233,False,True,move to the handbag at speed of 0.5 m/s

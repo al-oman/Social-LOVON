@@ -14,7 +14,8 @@ import numpy as np
 # ------------------------------------------------------------------
 SIGMA = 2.0    # Gaussian width (meters)
 H = 1.0        # peak danger at distance=0
-GAMMA =1.0   # trajectory discount factor
+GAMMA =1.01   # trajectory discount factor
+SIGMA_SPREAD = 0.1  # sigma grows by this much per prediction step (meters/step)
 
 
 # ------------------------------------------------------------------
@@ -51,8 +52,10 @@ def _trajectory_grid(X, Y, human_predicted_paths, sigma=SIGMA, h=H):
         pts = np.asarray(path, dtype=np.float64)  # (T, 2)
         gammas = GAMMA ** np.arange(pts.shape[0])  # (T,)
         for t in range(pts.shape[0]):
+            sigma_t = sigma + SIGMA_SPREAD * (t + 1)
+            inv_2s2_t = 1.0 / (2.0 * sigma_t * sigma_t)
             dist_sq = (X - pts[t, 0]) ** 2 + (Y - pts[t, 1]) ** 2
-            s = 1.0 - gammas[t] * h * np.exp(-dist_sq * inv_2s2)
+            s = 1.0 - gammas[t] * h * np.exp(-dist_sq * inv_2s2_t)
             np.minimum(safety, s, out=safety)
     return safety
 
