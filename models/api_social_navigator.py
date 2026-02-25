@@ -19,7 +19,7 @@ from models.humantrajectorypredictor import HumanTrajectoryPredictor
 from models.safety import (
     robot_safety_score, compute_safety_grid, safety_score_at_point, _safety_scores,
     SIGMA as _DEF_SIGMA, H as _DEF_H, GAMMA as _DEF_GAMMA,
-    SIGMA_SPREAD as _DEF_SIGMA_SPREAD, H_DECAY as _DEF_H_DECAY,
+    SIGMA_SPREAD as _DEF_SIGMA_SPREAD, H_TRAJ_SCALE as _DEF_H_TRAJ_SCALE,
 )
 
 logger = logging.getLogger("SocialNavigator")
@@ -91,14 +91,14 @@ class SocialNavigator:
     # ------------------------------------------------------------------ #
     DEFAULT_PARAMS = {
         # --- Action shield  params ---
-        "shield_thresh_on": 0.5,    # safety score below this → shield activates
-        "shield_thresh_off": 0.75,   # safety score above this → shield deactivates (hysteresis)
+        "shield_thresh_on": 0.7,    # safety score below this → shield activates
+        "shield_thresh_off": 0.8,   # safety score above this → shield deactivates (hysteresis)
         "shield_active_states": ["running"],  # mission states where shield is armed
         "mono_k": 300.0,
         # "correction_gain": 25.0,
         # "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
         "max_omega_mag": 1.0,
-        "vx_sfm_gain": 2.0,
+        "vx_sfm_gain": 3.0,
         "vy_sfm_gain": 1.0,
         "traj_step_size": 0.2,         # step size in meters for gradient walk
         "traj_gradient_gain": 1.0,     # how strongly the safety gradient nudges each step
@@ -116,7 +116,7 @@ class SocialNavigator:
         "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
         # --- Human Trajectory prediction ---
         "human_pred_history_steps": 25,
-        "human_pred_s": 3.0,
+        "human_pred_s": 5.0,
         "human_pred_steps": 25,
         "pred_interval": 1,    # predict every frame
         # --- Safety Gaussian shape ---
@@ -124,7 +124,7 @@ class SocialNavigator:
         "safety_h": _DEF_H,                       # peak danger amplitude (0..1)
         "safety_gamma": _DEF_GAMMA,               # per-step H multiplier along trajectory
         "safety_sigma_spread": _DEF_SIGMA_SPREAD,  # sigma growth per pred step (m/step)
-        "safety_h_decay": _DEF_H_DECAY,           # per-step H decay along trajectory
+        "safety_h_traj_scale": _DEF_H_TRAJ_SCALE,  # per-step H scale along trajectory (<1 shrinks, >1 grows)
         # --- ByteTrack tracker ---
         "track_high_thresh": 0.5,   # confidence >= this → first association
         "track_low_thresh": 0.1,    # confidence >= this → second association
@@ -169,7 +169,7 @@ class SocialNavigator:
             "h": self.params["safety_h"],
             "gamma": self.params["safety_gamma"],
             "sigma_spread": self.params["safety_sigma_spread"],
-            "h_decay": self.params["safety_h_decay"],
+            "h_traj_scale": self.params["safety_h_traj_scale"],
         }
 
         # --- Camera parameters ---
@@ -1703,7 +1703,6 @@ class SocialNavigator:
             num_cells=N,
             human_predicted_paths=human_predicted_paths or None,
             human_traj_pred=human_traj_pred,
-            **self._safety_kw,
         )
         return self.grid, extent
 

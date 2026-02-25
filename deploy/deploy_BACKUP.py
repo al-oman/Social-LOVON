@@ -1,14 +1,3 @@
-"""
-Unified deploy script — GUI and headless modes.
-
-Usage:
-    # GUI mode (original behavior):
-    python deploy/deploy.py --crowdnav_sim_mode --socialnav_enabled
-
-    # Headless batch evaluation:
-    python deploy/deploy.py --headless --crowdnav_sim_mode --socialnav_enabled --num_episodes 100
-"""
-
 import sys
 import os
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -16,88 +5,46 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 import numpy as np
+# import pyrealsense2 as rs
 import time
 import math
 import torch
 import threading
 import queue
 import argparse
+from ultralytics import YOLO
 import struct
-import csv
-import datetime
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_
+from unitree_sdk2py.go2.video.video_client import VideoClient as Go2VideoClient
+from unitree_sdk2py.go2.sport.sport_client import SportClient as Go2SportClient
+from unitree_sdk2py.h1.loco.h1_loco_client import LocoClient as H1SportClient
+from unitree_sdk2py.b2.sport.sport_client import SportClient as B2SportClient
+from unitree_sdk2py.b2.front_video.front_video_client import FrontVideoClient as B2FrontVideoClient
+from unitree_sdk2py.b2.back_video.back_video_client import BackVideoClient as B2BackVideoClient
+# from cxn_010.api_object_extraction_transformer import ObjectExtractionAPI
+# from cxn_010.api_language2motion_transformer import MotionPredictor
+
+from models.api_object_extraction import SequenceToSequenceClassAPI
+from models.api_language2mostion import MotionPredictor
+from models.api_social_navigator import SocialNavigator
+from tools.lidar import LidarWindowSide
+
+from tkinter import Tk, Entry, Button, Label, Frame
+from PIL import Image, ImageTk
+import cv2
 
 import logging
 logging.getLogger('ultralytics').setLevel(logging.ERROR)
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# ── Lazy / conditional imports ────────────────────────────────────────
-# Heavy GUI / camera imports are deferred so that headless mode works
-# on machines without displays or unitree SDK.
-
 DTYPE_TO_STRUCT = {
     1: 'b', 2: 'B', 3: 'h', 4: 'H',
     5: 'i', 6: 'I', 7: 'f', 8: 'd',
 }
 
-
-def _import_gui_deps():
-    """Import GUI-only dependencies (tkinter, PIL, cv2, YOLO, unitree)."""
-    global Tk, Entry, Button, Label, Frame
-    global Image, ImageTk
-    global cv2, YOLO
-    global ChannelFactoryInitialize, ChannelSubscriber, PointCloud2_
-    global Go2VideoClient, Go2SportClient, H1SportClient
-    global B2SportClient, B2FrontVideoClient, B2BackVideoClient
-    global LidarWindowSide
-
-    from tkinter import Tk, Entry, Button, Label, Frame
-    from PIL import Image, ImageTk
-    import cv2 as _cv2
-    globals()['cv2'] = _cv2
-    from ultralytics import YOLO as _YOLO
-    globals()['YOLO'] = _YOLO
-    from unitree_sdk2py.core.channel import ChannelFactoryInitialize as _CFI, ChannelSubscriber as _CS
-    from unitree_sdk2py.idl.sensor_msgs.msg.dds_ import PointCloud2_ as _PC2
-    globals()['ChannelFactoryInitialize'] = _CFI
-    globals()['ChannelSubscriber'] = _CS
-    globals()['PointCloud2_'] = _PC2
-    from unitree_sdk2py.go2.video.video_client import VideoClient as _GVC
-    from unitree_sdk2py.go2.sport.sport_client import SportClient as _GSC
-    from unitree_sdk2py.h1.loco.h1_loco_client import LocoClient as _HLC
-    from unitree_sdk2py.b2.sport.sport_client import SportClient as _BSC
-    from unitree_sdk2py.b2.front_video.front_video_client import FrontVideoClient as _BFC
-    from unitree_sdk2py.b2.back_video.back_video_client import BackVideoClient as _BBC
-    globals()['Go2VideoClient'] = _GVC
-    globals()['Go2SportClient'] = _GSC
-    globals()['H1SportClient'] = _HLC
-    globals()['B2SportClient'] = _BSC
-    globals()['B2FrontVideoClient'] = _BFC
-    globals()['B2BackVideoClient'] = _BBC
-    from tools.lidar import LidarWindowSide as _LWS
-    globals()['LidarWindowSide'] = _LWS
-
-
-def _import_headless_deps():
-    """Minimal imports for headless mode."""
-    import cv2 as _cv2
-    globals()['cv2'] = _cv2
-
-
-# Always-needed model imports
-from models.api_object_extraction import SequenceToSequenceClassAPI
-from models.api_language2mostion import MotionPredictor
-from models.api_social_navigator import SocialNavigator
-
-# CrowdNav policy choices (non-VLA)
-CROWDNAV_POLICIES = ("orca", "sarl", "lstm_rl", "cadrl")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Utility
-# ═══════════════════════════════════════════════════════════════════════
-
-def pointcloud2_to_array(msg):
+def pointcloud2_to_array(msg: PointCloud2_):
     """Parse a PointCloud2_ message into a dict of numpy arrays."""
     data = bytearray(msg.data)
     n_points = msg.width * msg.height
@@ -112,467 +59,6 @@ def pointcloud2_to_array(msg):
         result[field.name] = np.array(values)
     return result
 
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Shared CrowdNav policy logic (used by both HeadlessRunner and GUI)
-# ═══════════════════════════════════════════════════════════════════════
-
-class CrowdNavPolicyMixin:
-    """Methods for loading, validating, and stepping CrowdNav policies.
-
-    Expects the consumer to provide:
-        self.device, self.robot_policy_name, self.crowdnav_policy,
-        self.crowdnav_provider, self.JointState
-    """
-
-    def _validate_policy(self):
-        """Verify the requested policy was actually loaded and is functional."""
-        name = self.robot_policy_name
-
-        if name == "vla":
-            if self.motion_predictor is None:
-                raise RuntimeError("robot_policy='vla' but MotionPredictor failed to load")
-            print(f"[PolicyCheck] VLA policy active  "
-                  f"(object_extractor={self.object_extractor is not None}, "
-                  f"motion_predictor={self.motion_predictor is not None})")
-            return
-
-        # Non-VLA: crowdnav policy must exist
-        if self.crowdnav_policy is None:
-            raise RuntimeError(
-                f"robot_policy='{name}' but crowdnav_policy is None — "
-                f"policy failed to load silently")
-
-        # Verify the loaded policy class matches what was requested
-        actual_name = getattr(self.crowdnav_policy, 'name', None)
-        if actual_name and actual_name.lower() != name.lower():
-            raise RuntimeError(
-                f"Requested policy '{name}' but got '{actual_name}' — "
-                f"check policy_factory registration")
-
-        # Verify trainable policies have loaded weights (model params are non-zero)
-        if self.crowdnav_policy.trainable:
-            model = self.crowdnav_policy.get_model()
-            total_params = sum(p.numel() for p in model.parameters())
-            nonzero_params = sum((p != 0).sum().item() for p in model.parameters())
-            if nonzero_params == 0:
-                raise RuntimeError(
-                    f"Policy '{name}' model has {total_params} params but ALL are zero — "
-                    f"weights likely failed to load")
-            print(f"[PolicyCheck] {name} policy active  "
-                  f"trainable=True  params={total_params}  nonzero={nonzero_params}  "
-                  f"kinematics={getattr(self.crowdnav_policy, 'kinematics', '?')}")
-        else:
-            print(f"[PolicyCheck] {name} policy active  "
-                  f"trainable=False  "
-                  f"kinematics={getattr(self.crowdnav_policy, 'kinematics', '?')}")
-
-        # Warn about kinematics mismatch with environment
-        policy_kin = getattr(self.crowdnav_policy, 'kinematics', None)
-        env_kin = self.crowdnav_provider.kinematics
-        if policy_kin and policy_kin != env_kin:
-            print(f"[PolicyCheck] WARNING: policy kinematics '{policy_kin}' "
-                  f"overrode env kinematics '{env_kin}'")
-
-    def _load_crowdnav_policy(self, name, args):
-        """Instantiate and configure a CrowdNav policy by name."""
-        import configparser
-        from crowd_nav.policy.policy_factory import policy_factory
-
-        policy = policy_factory[name]()
-
-        cfg_path = getattr(args, "crowdnav_policy_config", None) or args.policy_config
-        policy_config = configparser.RawConfigParser()
-        policy_config.read(cfg_path)
-        policy.configure(policy_config)
-
-        if hasattr(policy, 'time_step') and policy.time_step is None:
-            policy.time_step = self.crowdnav_provider.time_step
-
-        if policy.trainable:
-            model_path = getattr(args, "crowdnav_model_path", None)
-            if model_path is None:
-                raise ValueError(
-                    f"--crowdnav_model_path is required for trainable policy '{name}'")
-            policy.set_device(self.device)
-            policy.set_phase("test")
-            policy.get_model().load_state_dict(torch.load(model_path, map_location=self.device))
-            policy.get_model().eval()
-            if getattr(policy, 'query_env', False):
-                policy.set_env(self.crowdnav_provider.env)
-
-        policy_kin = getattr(policy, 'kinematics', None)
-        if policy_kin and policy_kin != self.crowdnav_provider.kinematics:
-            print(f"  Overriding robot kinematics: "
-                  f"{self.crowdnav_provider.kinematics} → {policy_kin}")
-            self.crowdnav_provider.robot.kinematics = policy_kin
-            self.crowdnav_provider.kinematics = policy_kin
-
-        print(f"Loaded CrowdNav policy: {name}  trainable={policy.trainable}  "
-              f"kinematics={getattr(policy, 'kinematics', '?')}")
-        return policy
-
-    def _crowdnav_policy_action(self):
-        """Get action from CrowdNav policy -> body-frame [vx, vy, wz]."""
-        robot = self.crowdnav_provider.robot
-        self_state = robot.get_full_state()
-        human_states = self.crowdnav_provider.ob
-        if human_states is None:
-            self._last_crowdnav_action = None
-            return [0.0, 0.0, 0.0]
-
-        joint_state = self.JointState(self_state, human_states)
-        action = self.crowdnav_policy.predict(joint_state)
-        self._last_crowdnav_action = action
-
-        from crowd_sim.envs.utils.action import ActionXY, ActionRot, ActionXYRot
-        if isinstance(action, ActionXYRot):
-            return [action.vx, action.vy, action.wz]
-        elif isinstance(action, ActionXY):
-            cos_t = np.cos(-self_state.theta)
-            sin_t = np.sin(-self_state.theta)
-            vx_body = action.vx * cos_t - action.vy * sin_t
-            vy_body = action.vx * sin_t + action.vy * cos_t
-            return [float(vx_body), float(vy_body), 0.0]
-        elif isinstance(action, ActionRot):
-            wz = action.r / self.crowdnav_provider.time_step if self.crowdnav_provider.time_step > 0 else 0.0
-            return [float(action.v), 0.0, float(wz)]
-        else:
-            print(f"[PolicyCheck] WARNING: unknown action type {type(action).__name__} "
-                  f"from policy '{self.robot_policy_name}' — returning zero motion")
-            return [0.0, 0.0, 0.0]
-
-    def _crowdnav_step(self, motion_vector):
-        """Step the CrowdNav env using a body-frame motion_vector."""
-        from crowd_sim.envs.utils.action import ActionXY, ActionRot, ActionXYRot
-
-        env = self.crowdnav_provider.env
-        robot = self.crowdnav_provider.robot
-        self_state = robot.get_full_state()
-        kin = getattr(self.crowdnav_policy, 'kinematics', 'holonomic')
-
-        vx_b, vy_b, wz = motion_vector
-        if kin == "holonomic":
-            cos_t = np.cos(self_state.theta)
-            sin_t = np.sin(self_state.theta)
-            vx_w = vx_b * cos_t - vy_b * sin_t
-            vy_w = vx_b * sin_t + vy_b * cos_t
-            action = ActionXY(float(vx_w), float(vy_w))
-        elif kin == "unicycle":
-            r = wz * self.crowdnav_provider.time_step
-            action = ActionRot(float(np.hypot(vx_b, vy_b)), float(r))
-        else:
-            action = ActionXYRot(float(vx_b), float(vy_b), float(wz))
-
-        ob, reward, done, info = env.step(action)
-        self.crowdnav_provider.ob = ob
-        self.crowdnav_provider.done = done
-
-        human_states = ob
-        self.crowdnav_provider._robot_trajectory.append(
-            (self_state.px, self_state.py))
-        humans_rf = self.crowdnav_provider._humans_to_robot_frame(
-            robot.get_full_state(), human_states)
-
-        return {
-            "lidar": self.crowdnav_provider._generate_synthetic_lidar(humans_rf),
-            "pose_state": self.crowdnav_provider._generate_synthetic_pose_state(humans_rf),
-            "object_state": self.crowdnav_provider._generate_synthetic_object_state(
-                robot.get_full_state()),
-            "done": done,
-            "info": info,
-        }
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  HEADLESS RUNNER  (no threads, no GUI, synchronous tight loop)
-# ═══════════════════════════════════════════════════════════════════════
-
-class HeadlessRunner(CrowdNavPolicyMixin):
-    """Runs CrowdNav episodes as fast as possible without any GUI."""
-
-    def __init__(self, args):
-        from crowd_sim.envs.utils.info import Collision, Danger, ReachGoal, Timeout
-        from crowd_sim.envs.utils.state import JointState
-        self.Collision = Collision
-        self.Danger = Danger
-        self.ReachGoal = ReachGoal
-        self.Timeout = Timeout
-        self.JointState = JointState
-
-        self.args = args
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.robot_policy_name = getattr(args, "robot_policy", "vla")
-
-        # ── Models (only load VLA when needed) ──
-        if self.robot_policy_name == "vla":
-            self.object_extractor = SequenceToSequenceClassAPI(
-                model_path=args.object_extraction_model_path,
-                tokenizer_path=args.tokenizer_path,
-            )
-            self.motion_predictor = MotionPredictor(
-                model_path=args.language2motion_model_path,
-                tokenizer_path=args.tokenizer_path,
-            )
-            self.mission_instruction_0 = args.mission_instruction
-            self.mission_instruction_1 = args.mission_instruction
-            self.extracted_object = self.object_extractor.predict(self.mission_instruction_1)
-        else:
-            self.object_extractor = None
-            self.motion_predictor = None
-            self.mission_instruction_0 = args.mission_instruction
-            self.mission_instruction_1 = args.mission_instruction
-            self.extracted_object = "handbag"
-
-        # ── State dicts (same keys the GUI controller uses) ──
-        self.state = {
-            "predicted_object": "NULL",
-            "confidence": [0.00],
-            "object_xyn": [0.00, 0.00],
-            "object_whn": [0.00, 0.00],
-            "mission_state_in": "success",
-            "search_state_in": "had_searching_1",
-            "bounding_box": None,
-        }
-        self.pose_state = {"num_people": 0, "poses": [], "pose_boxes": []}
-        self.motion_vector = [0.0, 0.0, 0.0]
-
-        # ── CrowdNav provider ──
-        from models.crowdnav_data_provider import CrowdNavDataProvider
-        self.crowdnav_provider = CrowdNavDataProvider(
-            env_config_path=args.env_config,
-            policy_config_path=args.policy_config,
-            target_object=self.extracted_object,
-        )
-
-        # ── CrowdNav robot policy (non-VLA) ──
-        self.crowdnav_policy = None
-        if self.robot_policy_name in CROWDNAV_POLICIES:
-            self.crowdnav_policy = self._load_crowdnav_policy(
-                self.robot_policy_name, args)
-
-        # ── Validate policy actually loaded ──
-        self._validate_policy()
-
-        # ── Social Navigator ──
-        sn_kwargs = {
-            "image_width": self.crowdnav_provider.image_width,
-            "show_bezier_pts": False,
-            "use_lidar_depth": True,
-            "time_step": self.crowdnav_provider.time_step,
-            "image_height": self.crowdnav_provider.image_height,
-            "fov_deg": self.crowdnav_provider.fov_deg,
-            "fov_v_deg": self.crowdnav_provider.fov_deg,
-            "lidar_cam_z_offset": 0.0,
-            "lidar_cam_pitch_offset": 0.0,
-            "lidar_cam_yaw_offset": 0.0,
-            "mono_k": self.crowdnav_provider._fx * 0.3,
-            "human_traj_pred": not args.disable_human_traj_pred,
-        }
-        for key in ("safety_sigma", "safety_h", "safety_gamma",
-                    "safety_sigma_spread", "safety_h_traj_scale",
-                    "shield_thresh_on", "shield_thresh_off",
-                    "vx_sfm_gain", "human_pred_s"):
-            val = getattr(args, key, None)
-            if val is not None:
-                sn_kwargs[key] = val
-        self.social_nav = SocialNavigator(
-            enabled=args.socialnav_enabled, **sn_kwargs
-        )
-
-    # ------------------------------------------------------------------ #
-    #  Single episode
-    # ------------------------------------------------------------------ #
-
-    def _run_episode(self, episode_idx):
-        """Run one CrowdNav episode. Returns a result dict."""
-        self.crowdnav_provider.reset(robot_theta=self.args.robot_theta)
-        self.motion_vector = [0.0, 0.0, 0.0]
-        self.state["mission_state_in"] = "running"
-
-        self.social_nav._predictor.reset()
-        self.social_nav._tracked_humans.clear()
-        self.social_nav._ego_velocity = None
-        self.social_nav._frame_count = 0
-
-        step_count = 0
-        max_steps = self.args.max_steps
-        t0 = time.perf_counter()
-
-        collision = False
-        min_distance_episode = float('inf')
-        danger_count = 0
-        termination_reason = "max_steps"
-
-        while step_count < max_steps:
-            if self.crowdnav_policy is not None:
-                synthetic = self._crowdnav_step(self.motion_vector)
-            else:
-                synthetic = self.crowdnav_provider.step(self.motion_vector)
-            if synthetic is None:
-                break
-            step_count += 1
-
-            info = synthetic["info"]
-            if isinstance(info, self.Collision):
-                collision = True
-                termination_reason = "collision"
-            elif isinstance(info, self.Danger):
-                danger_count += 1
-            elif isinstance(info, self.ReachGoal):
-                termination_reason = "goal"
-            elif isinstance(info, self.Timeout):
-                termination_reason = "timeout"
-
-            robot_state = self.crowdnav_provider.robot.get_full_state()
-            humans = self.crowdnav_provider.env.humans
-            if humans:
-                dmin_step = min(
-                    np.hypot(h.px - robot_state.px, h.py - robot_state.py)
-                    - h.radius - robot_state.radius
-                    for h in humans
-                )
-                min_distance_episode = min(min_distance_episode, dmin_step)
-
-            self.pose_state = synthetic["pose_state"]
-            self.state.update(synthetic["object_state"])
-
-            state_copy = {**self.state}
-            self._update_motion_control(state_copy, lidar_cloud=synthetic["lidar"])
-
-            if synthetic["done"]:
-                break
-
-        elapsed = time.perf_counter() - t0
-        robot = self.crowdnav_provider.robot.get_full_state()
-        goal_dist = np.hypot(robot.gx - robot.px, robot.gy - robot.py)
-        reached = goal_dist < self.crowdnav_provider.robot.radius + 0.1
-
-        return {
-            "episode": episode_idx,
-            "steps": step_count,
-            "time_s": elapsed,
-            "sim_time": self.crowdnav_provider.env.global_time,
-            "reached_goal": reached,
-            "final_goal_dist": goal_dist,
-            "final_px": robot.px,
-            "final_py": robot.py,
-            "collision": collision,
-            "min_distance": min_distance_episode,
-            "danger_count": danger_count,
-            "termination_reason": termination_reason,
-        }
-
-    # ------------------------------------------------------------------ #
-    #  Motion control (same logic as VisualLanguageController)
-    # ------------------------------------------------------------------ #
-
-    def _update_motion_control(self, state, lidar_cloud=None):
-        if self.crowdnav_policy is not None:
-            self.motion_vector = self._crowdnav_policy_action()
-            self.state["mission_state_in"] = "running"
-        else:
-            input_data = {
-                "mission_instruction_0": self.mission_instruction_0,
-                "mission_instruction_1": self.mission_instruction_1,
-                **state,
-            }
-            prediction = self.motion_predictor.predict(input_data)
-            self.state["mission_state_in"] = prediction["predicted_state"]
-            self.state["search_state_in"] = prediction["search_state"]
-            self.motion_vector = prediction["motion_vector"]
-            if self.state["mission_state_in"] == "success":
-                self.motion_vector = [0.0, 0.0, 0.0]
-
-        bbox = self.state.get("bounding_box")
-        bbox_h = (bbox[3] - bbox[1]) if bbox else None
-        self.social_nav.update_goal(self.state["object_xyn"], bbox_h)
-
-        self.motion_vector = self.social_nav.step(
-            motion_vector=self.motion_vector,
-            pose_state=self.pose_state,
-            mission_state=self.state["mission_state_in"],
-            lidar_ranges=lidar_cloud,
-        )
-
-    # ------------------------------------------------------------------ #
-    #  Batch run
-    # ------------------------------------------------------------------ #
-
-    def run(self):
-        num_episodes = self.args.num_episodes
-        results = []
-
-        print(f"Running {num_episodes} episodes (headless) ...")
-        batch_t0 = time.perf_counter()
-
-        for ep in range(num_episodes):
-            res = self._run_episode(ep)
-            results.append(res)
-            status = "GOAL" if res["reached_goal"] else ("COLL" if res["collision"] else "FAIL")
-            print(
-                f"  [{ep+1}/{num_episodes}] {status}  "
-                f"steps={res['steps']}  sim_t={res['sim_time']:.2f}s  "
-                f"wall={res['time_s']:.3f}s  goal_dist={res['final_goal_dist']:.3f}  "
-                f"dmin={res['min_distance']:.3f}  danger={res['danger_count']}"
-            )
-
-        batch_elapsed = time.perf_counter() - batch_t0
-
-        # ── Summary ──
-        goals = sum(1 for r in results if r["reached_goal"])
-        collisions = sum(1 for r in results if r["collision"])
-        avg_min_dist = np.mean([r["min_distance"] for r in results]) if results else 0
-        avg_danger = np.mean([r["danger_count"] for r in results]) if results else 0
-        print(f"\n{'='*60}")
-        print(f"  Episodes:   {num_episodes}")
-        print(f"  Success:    {goals}/{num_episodes}  ({100*goals/max(num_episodes,1):.1f}%)")
-        print(f"  Collisions: {collisions}/{num_episodes}  ({100*collisions/max(num_episodes,1):.1f}%)")
-        print(f"  Avg min distance: {avg_min_dist:.3f} m")
-        print(f"  Avg danger count: {avg_danger:.1f} steps/episode")
-        print(f"  Wall time: {batch_elapsed:.2f}s  "
-              f"({batch_elapsed/max(num_episodes,1):.3f}s / episode)")
-        print(f"{'='*60}")
-
-        # ── Append batch summary row to CSV ──
-        csv_path = self.args.csv_path
-        avg_steps = np.mean([r["steps"] for r in results]) if results else 0
-        avg_sim_time = np.mean([r["sim_time"] for r in results]) if results else 0
-        avg_goal_dist = np.mean([r["final_goal_dist"] for r in results]) if results else 0
-
-        env_cfg = self.crowdnav_provider.env.config
-        batch_row = {
-            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "num_episodes": num_episodes,
-            "robot_policy": self.robot_policy_name,
-            "socialnav_enabled": self.args.socialnav_enabled,
-            "human_traj_pred": not self.args.disable_human_traj_pred,
-            "robot_theta": self.args.robot_theta,
-            "human_num": env_cfg.getint("sim", "human_num"),
-            "human_v_pref": env_cfg.getfloat("humans", "v_pref"),
-            "human_policy": env_cfg.get("humans", "policy"),
-            "mission_instruction": self.args.mission_instruction,
-            "success_rate": goals / max(num_episodes, 1),
-            "collision_rate": collisions / max(num_episodes, 1),
-            "avg_min_distance": avg_min_dist,
-            "avg_danger_count": avg_danger,
-            "avg_steps": avg_steps,
-            "avg_sim_time": avg_sim_time,
-            "avg_goal_dist": avg_goal_dist,
-            "wall_time": batch_elapsed,
-        }
-        file_exists = os.path.isfile(csv_path)
-        with open(csv_path, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=batch_row.keys())
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(batch_row)
-        print(f"Batch summary appended to {csv_path}")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-#  GUI THREAD CLASSES  (only instantiated when --headless is NOT used)
-# ═══════════════════════════════════════════════════════════════════════
 
 class LiDARGetterThread(threading.Thread):
     """LiDAR Point Cloud Acquisition Thread
@@ -605,8 +91,9 @@ class LiDARGetterThread(threading.Thread):
         while self.running:
             time.sleep(0.5)
 
-    def _on_pointcloud(self, msg):
+    def _on_pointcloud(self, msg: PointCloud2_):
         try:
+            # --- polling-rate diagnostics ---
             now = time.time()
             if self._last_cb_time is not None:
                 gap = now - self._last_cb_time
@@ -627,6 +114,7 @@ class LiDARGetterThread(threading.Thread):
             self.freq_count += 1
             if now - self.freq_start >= 1.0:
                 freq = self.freq_count / (now - self.freq_start)
+                # Diagnostic: log field names, point count, and value ranges
                 fields = list(cloud.keys())
                 n_pts = len(next(iter(cloud.values()))) if cloud else 0
                 avg_parse = self._parse_total / max(self._parse_count, 1)
@@ -676,8 +164,8 @@ class ImageGetterThread(threading.Thread):
         super().__init__()
         self.controller = controller
         self.running = True
-        self.image_queue = queue.Queue(maxsize=1)
-        self.pose_image_queue = queue.Queue(maxsize=1)
+        self.image_queue = queue.Queue(maxsize=1)  # Keep only the latest frame
+        self.pose_image_queue = queue.Queue(maxsize=1)  # Separate queue for pose processing if needed
         self.freq_start = time.time()
         self.freq_count = 0
 
@@ -690,7 +178,9 @@ class ImageGetterThread(threading.Thread):
                     self.controller._update_image_from_video_client()
                 elif self.controller.camera_type == "realsense":
                     self.controller._update_image_from_realsense()
+                    
 
+                # Ensure only the latest frame is kept in the queue
                 with self.controller.image_lock:
                     if hasattr(self.controller, 'image') and self.controller.image is not None:
                         current_image = self.controller.image.copy()
@@ -699,11 +189,13 @@ class ImageGetterThread(threading.Thread):
                                 self.image_queue.get_nowait()
                             except queue.Empty:
                                 pass
+                        # Calculate Laplacian variance to detect blur
                         laplacian_var, is_blur = self.detect_blur(
                             current_image, threshold=self.controller.blur_threshold
                         )
                         if not is_blur:
                             self.image_queue.put(current_image)
+                            # Also feed pose queue
                             if not self.pose_image_queue.empty():
                                 try:
                                     self.pose_image_queue.get_nowait()
@@ -738,11 +230,20 @@ class ImageGetterThread(threading.Thread):
 
     @staticmethod
     def detect_blur(image, threshold=100.0):
+        # Convert image to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate Laplacian variance (measure of sharpness)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+        # Determine if image is blurry
         is_blur = laplacian_var < threshold
+        
+        # Print detection result
+        # print(f"Laplacian Variance: {laplacian_var:.2f}")
+        # print("Image is blurry, discarding" if is_blur else "Image is clear")
         return laplacian_var, is_blur
-
+    
     def stop(self):
         self.running = False
         self.join()
@@ -766,6 +267,7 @@ class YoloProcessingThread(threading.Thread):
                 image = self.image_queue.get(timeout=1)
                 with self.controller.yolo_lock:
                     results = self.controller.yolo_model(image)
+                    # Pass original image for post-processing (mainly for dimension retrieval)
                     self.controller._yolo_image_post_process(results, image)
 
                 self.result_queue.put(self.controller.state.copy())
@@ -808,6 +310,7 @@ class YoloPoseProcessingThread(threading.Thread):
                 image = self.image_queue.get(timeout=1)
                 with self.controller.yolo_pose_lock:
                     results = self.controller.yolo_pose_model(image)
+                    # Process pose detection results
                     self.controller._yolo_pose_post_process(results, image)
 
                 self.result_queue.put(self.controller.pose_state.copy())
@@ -889,18 +392,17 @@ class MotionControlThread(threading.Thread):
 
         with c.motion_lock:
             mv = c.motion_vector if hasattr(c, 'motion_vector') else [0.0, 0.0, 0.0]
-            if getattr(c, 'crowdnav_policy', None) is not None:
-                synthetic = c._crowdnav_step(mv)
-            else:
-                synthetic = c.crowdnav_provider.step(mv)
-            if synthetic is None or synthetic.get("done", False):
+            synthetic = c.crowdnav_provider.step(mv)
+            if synthetic is None:
                 print("CrowdNav episode finished.")
                 c.sim_started = False
                 return
 
+            # Update controller state from synthetic data
             c.pose_state = synthetic["pose_state"]
             c.state.update(synthetic["object_state"])
 
+            # Push blank frame to GUI image queue
             frame = c.crowdnav_provider.get_blank_frame()
             img_q = c.image_getter_thread.image_queue
             if not img_q.empty():
@@ -910,11 +412,14 @@ class MotionControlThread(threading.Thread):
                     pass
             img_q.put(frame)
 
+            # Always render sim view (before motion control, which could fail)
             c.crowdnav_sim_frame = c.crowdnav_provider.render_frame()
 
+            # Build L2MM input: merge current state with synthetic object fields
             state = {**c.state}
             c._update_motion_control(state, lidar_cloud=synthetic["lidar"])
 
+            # Capture planned Bezier trajectory on first tick with a goal
             if c._planned_trajectory_world is None and c.social_nav._goal_rf is not None:
                 robot_state = c.crowdnav_provider.robot.get_full_state()
                 path_rf = c.social_nav._extrapolate_robot_trajectory(c.motion_vector)
@@ -929,59 +434,77 @@ class MotionControlThread(threading.Thread):
                         c._planned_trajectory_world.append((wx, wy))
                     c.crowdnav_provider.planned_trajectory = c._planned_trajectory_world
 
+                    # Transform Bezier control points to world frame
+                    # cp_rf = c.social_nav._best_control_pts
+                    # if cp_rf is not None and c.social_nav.params["show_bezier_pts"]:
+                    #     cp_world = []
+                    #     for pt in cp_rf:
+                    #         x_lat, depth = float(pt[0]), float(pt[1])
+                    #         wx = robot_state.px + depth * cos_t + x_lat * sin_t
+                    #         wy = robot_state.py + depth * sin_t - x_lat * cos_t
+                    #         cp_world.append((wx, wy))
+                    #     c.crowdnav_provider.planned_control_pts = cp_world
+
     def stop(self):
         self.running = False
         self.join()
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  GUI CONTROLLER  (original deploy.py VisualLanguageController)
-# ═══════════════════════════════════════════════════════════════════════
-
-class VisualLanguageController(CrowdNavPolicyMixin):
-    def __init__(self, args):
+class VisualLanguageController:
+    def __init__(self, yolo_model_dir="yolo-models/yolo11n.pt",
+                 yolo_pose_model_dir="yolo-models/yolo26n-pose.pt", 
+                 tokenizer_path=None, 
+                 object_extraction_model_path=None, 
+                 language2motion_model_path=None,
+                 camera_type='inner', 
+                 robot_type='go2', 
+                 show_video=True, 
+                 show_max_result=False,
+                 show_arrowed=False,
+                 blur_threshold=10.0,
+                 lengthen_filter=3,
+                 simulation_mode=False, 
+                 socialnav_enabled=False,
+                 network_device="enp8s0",
+                 crowdnav_sim_mode=False,
+                 robot_theta=None,
+                 human_traj_pred=True):
+        # Initialize core functional components
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.robot_policy_name = getattr(args, 'robot_policy', 'vla')
-        self.crowdnav_sim_mode = args.crowdnav_sim_mode
-
-        # ── Models: only load what the chosen policy needs ──
         self.object_extractor = SequenceToSequenceClassAPI(
-            model_path=args.object_extraction_model_path,
-            tokenizer_path=args.tokenizer_path
+            model_path=object_extraction_model_path,
+            tokenizer_path=tokenizer_path
         )
-        if not self.crowdnav_sim_mode:
-            self.yolo_model = YOLO(args.yolo_model_dir)
-            self.yolo_pose_model = YOLO(args.yolo_pose_model_dir)
-        if self.robot_policy_name == "vla":
-            self.motion_predictor = MotionPredictor(
-                model_path=args.language2motion_model_path,
-                tokenizer_path=args.tokenizer_path
-            )
-        else:
-            self.motion_predictor = None
+        if not crowdnav_sim_mode:
+            self.yolo_model = YOLO(yolo_model_dir)
+            self.yolo_pose_model = YOLO(yolo_pose_model_dir)
+        self.motion_predictor = MotionPredictor(
+            model_path=language2motion_model_path,
+            tokenizer_path=tokenizer_path
+        )
 
-        # JointState needed by CrowdNavPolicyMixin
-        from crowd_sim.envs.utils.state import JointState
-        self.JointState = JointState
-
-        self.show_video = args.show_video
-        self.show_max_result = args.show_max_result
-        self.show_arrowed = args.show_arrowed
-        self.camera_type = args.camera_type
-        self.robot_type = args.robot_type
-        self.blur_threshold = args.threshold
-        self.lengthen_filter = args.lengthen_filter
-        self.simulation_mode = args.simulation_mode
-        self.socialnav_enabled = args.socialnav_enabled
+        # Command-line configurable parameters
+        self.show_video = show_video
+        self.show_max_result = show_max_result
+        self.show_arrowed = show_arrowed  # Whether to display arrow vectors
+        self.camera_type = camera_type
+        self.robot_type = robot_type
+        self.blur_threshold = blur_threshold  # Threshold for blur detection
+        self.lengthen_filter = lengthen_filter  # Number of historical detection results to keep
+        self.simulation_mode = simulation_mode  # Whether to run in simulation mode
+        self.socialnav_enabled = socialnav_enabled  # Whether to enable social navigation adjustments
         self.button_update_inst = False
-        self.network_device = args.network_device
-        self.robot_theta = args.robot_theta
-        self.human_traj_pred = not args.disable_human_traj_pred
+        self.network_device = network_device
+        self.crowdnav_sim_mode = crowdnav_sim_mode
+        self.robot_theta = robot_theta
+        self.human_traj_pred = human_traj_pred
 
-        # Non-VLA policies require crowdnav_sim_mode
-        if self.robot_policy_name in CROWDNAV_POLICIES and not self.crowdnav_sim_mode:
-            raise ValueError(
-                f"--robot_policy '{self.robot_policy_name}' requires --crowdnav_sim_mode in GUI mode.")
+        # Initialize RealSense camera if selected
+        # if self.camera_type == "realsense":
+        #     self.pipeline = rs.pipeline()
+        #     self.config = rs.config()
+        #     self.config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 15)
+        #     self.pipeline.start(self.config)
 
         # Initialize Unitree SDK components
         if not self.simulation_mode and not self.crowdnav_sim_mode:
@@ -1009,21 +532,21 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             "pose_boxes": [],
         }
 
-        # Thread locks
+        # Initialize thread locks
         self.image_lock = threading.Lock()
         self.yolo_lock = threading.Lock()
         self.yolo_pose_lock = threading.Lock()
         self.motion_lock = threading.Lock()
-        self.freq_lock = threading.Lock()
+        self.freq_lock = threading.Lock()  # Lock for frequency updates
 
-        # Frequency monitoring
+        # Initialize frequency monitoring variables
         self.image_getter_freq = 0.0
         self.yolo_processor_freq = 0.0
         self.yolo_pose_processor_freq = 0.0
         self.motion_control_freq = 0.0
         self.lidar_getter_freq = 0.0
 
-        # CrowdNav sim provider
+        # CrowdNav sim provider (replaces camera + lidar + YOLO)
         if self.crowdnav_sim_mode:
             from models.crowdnav_data_provider import CrowdNavDataProvider
             self.crowdnav_provider = CrowdNavDataProvider(
@@ -1036,19 +559,10 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             self.motion_vector = [0.0, 0.0, 0.0]
             self.sim_started = False
             self.sim_paused = False
-            self._planned_trajectory_world = None
+            self._planned_trajectory_world = None  # captured on first goal detection
             self.crowdnav_sim_frame = self.crowdnav_provider.render_frame()
 
-        # ── CrowdNav robot policy (non-VLA) ──
-        self.crowdnav_policy = None
-        if self.robot_policy_name in CROWDNAV_POLICIES:
-            self.crowdnav_policy = self._load_crowdnav_policy(
-                self.robot_policy_name, args)
-
-        # ── Validate policy actually loaded ──
-        self._validate_policy()
-
-        # Worker threads
+        # Initialize worker threads
         self.image_getter_thread = ImageGetterThread(self)
         if not self.crowdnav_sim_mode:
             self.yolo_processing_thread = YoloProcessingThread(self)
@@ -1059,7 +573,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         else:
             self.lidar_getter_thread = None
 
-        # Social navigation
+        # Load social navigaton function
         sn_width = self.crowdnav_provider.image_width if self.crowdnav_sim_mode else args.image_width
         sn_kwargs = {"image_width": sn_width,
                      "show_bezier_pts": args.show_bezier_pts}
@@ -1072,24 +586,25 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             sn_kwargs["lidar_cam_z_offset"] = 0.0
             sn_kwargs["lidar_cam_pitch_offset"] = 0.0
             sn_kwargs["lidar_cam_yaw_offset"] = 0.0
-            sn_kwargs["mono_k"] = self.crowdnav_provider._fx * 0.3
+            sn_kwargs["mono_k"] = self.crowdnav_provider._fx * 0.3  # match goal_size_m in _generate_synthetic_object_state
             sn_kwargs["human_traj_pred"] = self.human_traj_pred
+        # Forward any safety gaussian overrides from CLI
         for key in ("safety_sigma", "safety_h", "safety_gamma",
-                    "safety_sigma_spread", "safety_h_traj_scale",
-                    "shield_thresh_on", "shield_thresh_off",
-                    "vx_sfm_gain", "human_pred_s"):
+                    "safety_sigma_spread", "safety_h_traj_scale"):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
+        # self.lidar_window = LidarWindowSide()
 
         # Initialize UI
         self.root = Tk()
         self.root.title("Visual Language Motion Controller")
         self.font_style = ("Arial", 16, "bold")
-        self.small_font = ("Arial", 14, "bold")
+        self.small_font = ("Arial", 14, "bold")  # Font for frequency display
 
+        # Create left (image + BEV) and right (instruction) frames
         self.image_frame = Frame(self.root)
         self.image_frame.pack(side='left', fill='both', expand=False)
 
@@ -1101,7 +616,8 @@ class VisualLanguageController(CrowdNavPolicyMixin):
 
         self.init_ui()
 
-        if self.show_video:
+        # Initialize video display if enabled
+        if show_video:
             self.image_label = Label(self.image_frame)
             self.image_label.pack(fill='both', expand=True)
 
@@ -1121,18 +637,25 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             if not self.webcam.isOpened():
                 print("ERROR: Could not open webcam. Check camera permissions.")
             else:
+                # Warm up camera
                 for _ in range(5):
                     self.webcam.read()
+
 
     def init_ui(self):
         """Initialize UI Interface"""
         screen_width = self.root.winfo_screenwidth()
         window_width = 1400
         window_height = 800
+        # Set window position (right-aligned) and size
+        # self.root.geometry(f"{window_width}x{window_height}+{screen_width - 1850}+20")
         self.root.geometry(f"{window_width}x{window_height}+{0}+20")
 
+        # Robot control buttons (top of right frame)
         control_frame = Frame(self.instruction_frame)
         control_frame.pack(pady=10, padx=10, anchor='n')
+        # Button(control_frame, text="Damp", command=self.sport_client.Damp,
+        #        font=self.font_style, width=15).pack(side='left', padx=5)
         Button(control_frame, text="Damp",
                command=lambda: print("Damp command") if self.simulation_mode else self.sport_client.Damp,
                font=self.font_style, width=15).pack(side='left', padx=5)
@@ -1155,8 +678,18 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                    font=self.font_style, width=12)
             self.pause_button.pack(pady=5)
 
+        # Mission instruction input area
         initial_instructions = [
             "move to the handbag at speed of 1.0 m/s"
+            # "move to the person at speed of 0.7 m/s",
+            # "Run to the human at speed of 0.5 m/s",
+            # "run to the chair at speed of 0.4 m/s",
+            # "approach the car at speed of 0.5 m/s",
+            # "run to the bicycle at speed of 0.4 m/s",
+            # "Rush to the chair at speed of 0.3 m/s",
+            # "move to the armchair at speed of 0.35 m/s",
+            # "Sprint to the game ball at speed of 0.35 m/s",
+            # "Approach to the laptop at speed of 0.3 m/s"
         ]
 
         self.instruction_entries = []
@@ -1166,6 +699,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             entry.pack(pady=5)
             self.instruction_entries.append(entry)
 
+            # Button to submit current instruction
             button = Button(
                 self.instruction_frame,
                 text=f"Submit Mission {idx + 1}",
@@ -1174,6 +708,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             )
             button.pack(pady=2)
 
+        # Status display labels
         self.mission_label = Label(self.instruction_frame, text="Current Mission: ", font=self.font_style)
         self.mission_label.pack(pady=10)
         self.object_label = Label(self.instruction_frame, text="Extracted Object: ", font=self.font_style)
@@ -1183,18 +718,19 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         self.motion_label = Label(self.instruction_frame, text="Motion Vector: ", font=self.font_style)
         self.motion_label.pack(pady=10)
 
+        # Frequency display area (bottom of right frame)
         freq_display_frame = Frame(self.instruction_frame, bd=1, relief='sunken', padx=10, pady=5)
         freq_display_frame.pack(side='bottom', fill='both', expand=True, padx=10, pady=10)
 
-        self.freq_image_label = Label(freq_display_frame, text="[ImageGetter] Frequency: 0.00 Hz",
+        self.freq_image_label = Label(freq_display_frame, text="[ImageGetter] Frequency: 0.00 Hz", 
                                       font=self.small_font, anchor='w', fg='red')
         self.freq_image_label.pack(anchor='w', pady=2)
 
-        self.freq_yolo_label = Label(freq_display_frame, text="[YoloProcessor] Frequency: 0.00 Hz",
+        self.freq_yolo_label = Label(freq_display_frame, text="[YoloProcessor] Frequency: 0.00 Hz", 
                                      font=self.small_font, anchor='w', fg='red')
         self.freq_yolo_label.pack(anchor='w', pady=2)
 
-        self.freq_yolo_pose_label = Label(freq_display_frame, text="[YoloPoseProcessor] Frequency: 0.00 Hz",
+        self.freq_yolo_pose_label = Label(freq_display_frame, text="[YoloPoseProcessor] Frequency: 0.00 Hz", 
                                      font=self.small_font, anchor='w', fg='red')
         self.freq_yolo_pose_label.pack(anchor='w', pady=2)
 
@@ -1212,16 +748,18 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         """Update UI Status Labels"""
         self.mission_label.config(text=f"Current Mission: {self.mission_instruction_1}")
         self.object_label.config(text=f"Extracted Object: {self.extracted_object}")
-
+        
+        # Update mission instruction history
         if self.button_update_inst:
             self.button_update_inst = False
         else:
             self.mission_instruction_0 = self.mission_instruction_1
-
+        
         self.state_label.config(text=f"Mission State: {self.state['mission_state_in']}")
         motion_text = f"Motion Vector: {self.motion_vector}" if hasattr(self, 'motion_vector') else "Motion Vector: Not Available"
         self.motion_label.config(text=motion_text)
-
+        
+        # Refresh every 1 second
         self.root.after(1000, self.update_ui_labels)
 
     def update_freq_display(self):
@@ -1239,19 +777,22 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         self.freq_motion_label.config(text=f"[MotionControl] Frequency: {motion_freq} Hz")
         self.freq_lidar_label.config(text=f"[LiDARGetter] Frequency: {lidar_freq} Hz")
 
+        # Refresh every 100ms
         self.root.after(100, self.update_freq_display)
 
     def update_instruction(self, entry):
         """Process Mission Instruction Submission"""
         new_instr = entry.get()
         if new_instr:
+            # Update instruction history
             self.mission_instruction_0 = self.mission_instruction_1
             self.mission_instruction_1 = new_instr
+            # Extract target object from new instruction
             self.extracted_object = self.object_extractor.predict(new_instr)
             self.button_update_inst = True
             self.state["mission_state_in"] = "running"
             print(f"Updated Mission Instruction: {self.mission_instruction_1}")
-            self.update_ui_labels()
+            self.update_ui_labels()  # Immediately update UI
 
     def _start_sim(self):
         """Start the CrowdNav simulation."""
@@ -1291,11 +832,12 @@ class VisualLanguageController(CrowdNavPolicyMixin):
 
     def _save_paths(self):
         """Save planned Bezier trajectory and actual robot path to a timestamped txt file."""
+        import datetime
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filepath = f"paths_{ts}.txt"
 
-        actual = self.crowdnav_provider._robot_trajectory
-        planned = self._planned_trajectory_world
+        actual = self.crowdnav_provider._robot_trajectory  # list of (px, py)
+        planned = self._planned_trajectory_world            # list of (wx, wy) or None
 
         with open(filepath, 'w') as f:
             f.write("# Planned trajectory (Bezier, world coords)\n")
@@ -1316,7 +858,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
     def _init_channel_factory(self):
         """Initialize Unitree Channel Factory"""
         if len(sys.argv) > 1:
-            ChannelFactoryInitialize(0, self.network_device)
+            ChannelFactoryInitialize(0,self.network_device)
         else:
             ChannelFactoryInitialize(0)
 
@@ -1352,7 +894,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         """Update Image from Robot's Built-in Camera"""
         code, data = self.video_client.GetImageSample()
         if code != 0:
-            print("Failed to get image, error code:", code)
+            print("Failed to获取图像失败，错误代码:", code)
             return
         if isinstance(data, list):
             data = bytes(data)
@@ -1370,9 +912,9 @@ class VisualLanguageController(CrowdNavPolicyMixin):
     def _update_image_from_webcam(self):
         """Update Image from built-in webcam"""
         if not hasattr(self, 'webcam'):
-            self.webcam = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+            self.webcam = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)  # macOS
             if not self.webcam.isOpened():
-                self.webcam = cv2.VideoCapture(0)
+                self.webcam = cv2.VideoCapture(0)  # fallback
             if not self.webcam.isOpened():
                 print("ERROR: Could not open webcam")
                 return
@@ -1396,6 +938,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             for box in result.boxes:
                 class_name = result.names[int(box.cls)]
                 if class_name == self.extracted_object:
+                    # Convert normalized coordinates to pixel coordinates (xywhn to xyxy)
                     img_height, img_width = original_image.shape[:2]
                     x_center_n, y_center_n = box.xywhn[0][0], box.xywhn[0][1]
                     width_n, height_n = box.xywhn[0][2], box.xywhn[0][3]
@@ -1403,15 +946,16 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                     y1 = int((y_center_n - height_n/2) * img_height)
                     x2 = int((x_center_n + width_n/2) * img_width)
                     y2 = int((y_center_n + height_n/2) * img_height)
-
+                    
                     detections.append({
                         "object": class_name,
                         "confidence": float(box.conf),
                         "xyn": box.xywhn[0][:2].tolist(),
                         "whn": box.xywhn[0][2:].tolist(),
-                        "xyxy": (x1, y1, x2, y2)
+                        "xyxy": (x1, y1, x2, y2)  # Bounding box in pixel coordinates
                     })
 
+        # Initialize history storage if not exists
         if not hasattr(self, 'history_confidence'):
                 self.history_object = []
                 self.history_confidence = []
@@ -1419,16 +963,19 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                 self.history_whn = []
                 self.history_xyxy = []
                 self.last_best = None
-
+                
+        # Update detection history
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
             self.last_best = best
+            # Store detection results in a sliding window fashion
             self.history_object.append(best["object"])
             self.history_confidence.append(best["confidence"])
             self.history_xyn.append(best["xyn"])
             self.history_whn.append(best["whn"])
             self.history_xyxy.append(best["xyxy"])
-
+            
+            # Maintain fixed window size
             if len(self.history_object) > self.lengthen_filter:
                 self.history_object.pop(0)
                 self.history_confidence.pop(0)
@@ -1436,33 +983,39 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                 self.history_whn.pop(0)
                 self.history_xyxy.pop(0)
         else:
+            # Handle case with no detections
             self.history_object.append("NULL")
             self.history_confidence.append(0.00)
             self.history_xyn.append(self.last_best["xyn"] if self.last_best else [0.00, 0.00])
             self.history_whn.append(self.last_best["whn"] if self.last_best else [0.00, 0.00])
             self.history_xyxy.append(self.last_best["xyxy"] if self.last_best else [0, 0, 0, 0])
-
+            
+            # Maintain fixed window size
             if len(self.history_object) > self.lengthen_filter:
                 self.history_object.pop(0)
                 self.history_confidence.pop(0)
                 self.history_xyn.pop(0)
                 self.history_whn.pop(0)
                 self.history_xyxy.pop(0)
-
+                
+        # Calculate average values from history
         avg_confidence = np.mean(self.history_confidence)
         avg_xyn = np.mean(self.history_xyn, axis=0).tolist()
         avg_whn = np.mean(self.history_whn, axis=0).tolist()
         avg_xyxy = np.mean(self.history_xyxy, axis=0).tolist()
         avg_xyxy = [int(coord) for coord in avg_xyxy]
 
+        # Find most common detected object
         most_common_object = max(set(self.history_object), key=self.history_object.count)
-
+        
+        # Handle case where most common object is NULL
         if most_common_object == "NULL":
             avg_confidence = 0.00
             avg_xyn = [0.00, 0.00]
             avg_whn = [0.00, 0.00]
             avg_xyxy = None
 
+        # Update state with processed results
         self.state.update({
             "predicted_object": most_common_object,
             "confidence": [avg_confidence],
@@ -1475,26 +1028,29 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         """Process YOLO Pose Detection Results"""
         poses = []
         pose_boxes = []
-
+        
         for result in results:
             if result.keypoints is not None:
                 for idx, keypoints in enumerate(result.keypoints):
+                    # Get bounding box
                     if result.boxes is not None and idx < len(result.boxes):
                         box = result.boxes[idx]
                         x1, y1, x2, y2 = box.xyxy[0].tolist()
                         confidence = float(box.conf)
-
-                        kpts = keypoints.xy[0].cpu().numpy()
+                        
+                        # Get keypoints (17 keypoints for COCO format)
+                        kpts = keypoints.xy[0].cpu().numpy()  # Shape: (17, 2)
                         kpts_conf = keypoints.conf[0].cpu().numpy() if hasattr(keypoints, 'conf') else None
-
+                        
                         poses.append({
                             "keypoints": kpts.tolist(),
                             "keypoints_conf": kpts_conf.tolist() if kpts_conf is not None else None,
                             "confidence": confidence
                         })
-
+                        
                         pose_boxes.append([int(x1), int(y1), int(x2), int(y2)])
-
+        
+        # Update pose state
         self.pose_state.update({
             "num_people": len(poses),
             "poses": poses,
@@ -1503,23 +1059,23 @@ class VisualLanguageController(CrowdNavPolicyMixin):
 
     def _update_motion_control(self, state, lidar_cloud=None):
         """Update Motion Control Parameters Based on Detection Results"""
-        if self.crowdnav_policy is not None:
-            # ── CrowdNav policy path ──
-            self.motion_vector = self._crowdnav_policy_action()
-            self.state["mission_state_in"] = "running"
-        else:
-            # ── VLA (L2MM) path ──
-            input_data = {
-                "mission_instruction_0": self.mission_instruction_0,
-                "mission_instruction_1": self.mission_instruction_1,
-                **state
-            }
-            prediction = self.motion_predictor.predict(input_data)
-            self.state["mission_state_in"] = prediction["predicted_state"]
-            self.state["search_state_in"] = prediction["search_state"]
-            self.motion_vector = prediction["motion_vector"]
-            if self.state["mission_state_in"] == "success":
-                self.motion_vector = [0.0, 0.0, 0.0]
+        input_data = {
+            "mission_instruction_0": self.mission_instruction_0,
+            "mission_instruction_1": self.mission_instruction_1,
+            **state
+        }
+        t0 = time.perf_counter()
+        prediction = self.motion_predictor.predict(input_data)
+        # print(f"inference_speed: {time.perf_counter()-t0}")
+        self.state["mission_state_in"] = prediction["predicted_state"]
+        self.state["search_state_in"] = prediction["search_state"]
+        self.motion_vector = prediction["motion_vector"]
+        if self.state["mission_state_in"] == "success":
+            self.motion_vector = [0.0, 0.0, 0.0]
+
+        #-----------------------------------------------------------
+        # Addition of Social Nav element! Adjusts the output of L2MM motion vector
+        #-----------------------------------------------------------
 
         if lidar_cloud is None:
             lidar_cloud = self.lidar_getter_thread.get_cloud() if self.lidar_getter_thread else None
@@ -1543,47 +1099,56 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                 print(f"vx={v_x:.4f}, vy={v_y:.4f}, wz={w_z:.4f}")
             else:
                 self.sport_client.Move(v_x, v_y, w_z)
-
+            
     def _show_results(self, image):
         """Draw Detection Results and Information on Image"""
+        # Draw bounding box if enabled and object detected
         if self.state["predicted_object"] != "NULL" and self.state["bounding_box"] is not None and self.show_max_result:
             x1, y1, x2, y2 = self.state["bounding_box"]
             confidence = self.state["confidence"][0]
             class_name = self.state["predicted_object"]
             object_cxy = self.state["object_xyn"]
-
-            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
+            
+            # Draw bounding box
+            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green border
+            
+            # Draw label and confidence
             label = f"{class_name}: {confidence:.2f}"
             (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (0, 255, 0), -1)
-            cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-
+            cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (0, 255, 0), -1)  # Label background
+            cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)  # Black text
+            
+            # Draw arrow from image center to object center if enabled
             if self.show_arrowed:
                 image_center = (image.shape[1] // 2, image.shape[0] // 2)
                 object_center = (int(object_cxy[0] * image.shape[1]), int(object_cxy[1] * image.shape[0]))
                 cv2.arrowedLine(image, image_center, object_center, (255, 0, 255), 2)
 
-                cv2.circle(image, image_center, 10, (0, 255, 0), -1)
-                cv2.circle(image, object_center, 10, (0, 255, 255), 2)
+                # Draw reference points
+                cv2.circle(image, image_center, 10, (0, 255, 0), -1)  # Solid circle at center
+                cv2.circle(image, object_center, 10, (0, 255, 255), 2)  # Hollow circle at object
 
+        # Draw pose estimation results
         if self.pose_state["num_people"] > 0:
+            # COCO keypoint connections (skeleton)
             skeleton = [
-                [0, 1], [0, 2], [1, 3], [2, 4],
-                [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],
-                [5, 11], [6, 12], [11, 12],
-                [11, 13], [13, 15], [12, 14], [14, 16]
+                [0, 1], [0, 2], [1, 3], [2, 4],  # Head
+                [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],  # Arms
+                [5, 11], [6, 12], [11, 12],  # Torso
+                [11, 13], [13, 15], [12, 14], [14, 16]  # Legs
             ]
-
+            
             for idx, pose in enumerate(self.pose_state["poses"]):
                 keypoints = pose["keypoints"]
                 keypoints_conf = pose["keypoints_conf"]
                 confidence = pose["confidence"]
-
+                
+                # Draw bounding box for person
                 if idx < len(self.pose_state["pose_boxes"]):
                     x1, y1, x2, y2 = self.pose_state["pose_boxes"][idx]
-                    cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 2)
-
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue border
+                    
+                    # Draw label with distance from social nav
                     dist_str = ""
                     if hasattr(self, 'social_nav') and self.social_nav.enabled:
                         h = self.social_nav._tracked_humans.get(idx)
@@ -1596,20 +1161,24 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                     (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                     cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (255, 0, 0), -1)
                     cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
+                
+                # Draw keypoints
                 for i, (x, y) in enumerate(keypoints):
                     conf = keypoints_conf[i] if keypoints_conf else 1.0
-                    if conf > 0.5:
-                        cv2.circle(image, (int(x), int(y)), 4, (0, 255, 255), -1)
-
+                    if conf > 0.5:  # Only draw high-confidence keypoints
+                        cv2.circle(image, (int(x), int(y)), 4, (0, 255, 255), -1)  # Yellow keypoints
+                
+                # Draw skeleton connections
                 for connection in skeleton:
                     pt1_idx, pt2_idx = connection
-                    if (keypoints_conf is None or
+                    if (keypoints_conf is None or 
                         (keypoints_conf[pt1_idx] > 0.5 and keypoints_conf[pt2_idx] > 0.5)):
                         pt1 = tuple(map(int, keypoints[pt1_idx]))
                         pt2 = tuple(map(int, keypoints[pt2_idx]))
-                        cv2.line(image, pt1, pt2, (0, 255, 0), 2)
+                        cv2.line(image, pt1, pt2, (0, 255, 0), 2)  # Green skeleton lines
 
+
+        # Draw status information with black background
         texts = [
             f"Mission Instruction 1: {self.mission_instruction_1}",
             f"Mission Instruction 0: {self.mission_instruction_0}",
@@ -1626,16 +1195,19 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         font_scale = 0.9
         font_color = (255, 255, 0)
         font_thickness = 2
-        padding = 5
+        padding = 5  # Padding between text and background rectangle
 
         for text, y in zip(texts, y_positions):
+            # Calculate text dimensions
             (text_width, text_height), baseline = cv2.getTextSize(text, font, font_scale, font_thickness)
+            # Draw black background rectangle
             x = 10
             rect_x = x - padding
             rect_y = y - text_height - padding
             rect_width = text_width + 2 * padding
             rect_height = text_height + baseline + 2 * padding
             cv2.rectangle(image, (rect_x, rect_y), (rect_x + rect_width, rect_y + rect_height), (0, 0, 0), -1)
+            # Draw text
             cv2.putText(image, text, (x, y), font, font_scale, font_color, font_thickness, cv2.LINE_AA)
 
         safety_texts = [
@@ -1651,12 +1223,12 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             safety_texts.append(f"number of humans: {n_humans}")
             safety_texts.append(f"safety score: {safety_score:.2f}")
             safety_texts.append(f"shield active: {sheild_active}")
-
+        
         traj_score = self.social_nav.diag["traj_score"]
         safety_texts.append(f"traj score: {traj_score:.2f}")
         best_score = self.social_nav.diag["best_traj_score"]
         safety_texts.append(f"best score: {best_score:.2f}")
-
+        
         safety_y_positions = [30 + i * 30 for i in range(len(safety_texts))]
         for safety_text, y in zip(safety_texts, safety_y_positions):
             (text_width, text_height), baseline = cv2.getTextSize(safety_text, font, font_scale, font_thickness)
@@ -1684,6 +1256,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                 self.image_label.config(image=photo)
                 self.image_label.image = photo
 
+                # Render BEV in its own panel
                 if hasattr(self, 'social_nav'):
                     bev = self.social_nav.render_bev(show_heatmap=True)
                     bev = cv2.cvtColor(bev, cv2.COLOR_BGR2RGB)
@@ -1691,6 +1264,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                     self.bev_label.config(image=bev_photo)
                     self.bev_label.image = bev_photo
 
+                # Render separate LiDAR top-down window
                 if hasattr(self, 'lidar_window') and hasattr(self, 'social_nav'):
                     cloud = self.social_nav._lidar_ranges
                     if cloud is not None:
@@ -1700,6 +1274,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         except Exception as e:
             print(f"Image update error: {e}")
 
+        # Render CrowdNav sim view (outside queue dependency so it updates on reset/init too)
         if self.crowdnav_sim_mode and getattr(self, 'crowdnav_sim_frame', None) is not None:
             sim_rgb = cv2.cvtColor(self.crowdnav_sim_frame, cv2.COLOR_BGR2RGB)
             sim_img = Image.fromarray(sim_rgb).resize((400, 400), Image.LANCZOS)
@@ -1737,80 +1312,70 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         """Main Run Method"""
         self.start_threads()
         self.root.after(100, self.update_ui_labels)
-        self.root.after(100, self.update_freq_display)
+        self.root.after(100, self.update_freq_display)  # Start frequency update loop
         self.root.mainloop()
         self.stop_threads()
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  CLI
-# ═══════════════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Visual Language Motion Controller — GUI or headless batch evaluation"
-    )
-
-    # ── Headless-specific ──
-    parser.add_argument("--headless", action="store_true", default=False,
-                        help="Run without GUI for fast batch evaluation")
-    parser.add_argument("--num_episodes", type=int, default=100,
-                        help="Number of episodes to run (headless only)")
-    parser.add_argument("--max_steps", type=int, default=500,
-                        help="Max sim steps per episode before timeout")
-    parser.add_argument("--csv_path", type=str, default="eval_results.csv",
-                        help="Path to append batch summary rows to")
-    parser.add_argument("--mission_instruction", type=str,
-                        default="move to the handbag at speed of 0.5 m/s",
-                        help="Mission instruction for all episodes")
-
-    # ── Model paths ──
-    parser.add_argument('--yolo_model_dir', type=str,
-                        default="models/yolo-models/yolo11x.pt")
-    parser.add_argument('--yolo_pose_model_dir', type=str,
-                        default="models/yolo-models/yolo26n-pose.pt")
-    parser.add_argument('--tokenizer_path', type=str,
-                        default="models/tokenizer_language2motion_n1000000")
-    parser.add_argument('--object_extraction_model_path', type=str,
-                        default="models/model_object_extraction_n1000000_d64_h4_l2_f256_msl64_hold_success")
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Visual Language Motion Controller for Unitree Robots')
+    
+    # Model paths
+    parser.add_argument('--yolo_model_dir', type=str, default="models/yolo-models/yolo11x.pt",
+                      help='Path to YOLO model directory')
+    parser.add_argument('--yolo_pose_model_dir', type=str, default="models/yolo-models/yolo26n-pose.pt",
+                      help='Path to YOLO pose model directory')
+    parser.add_argument('--tokenizer_path', type=str, default="models/tokenizer_language2motion_n1000000",
+                      help='Path to tokenizer')
+    parser.add_argument('--object_extraction_model_path', type=str, 
+                      default="models/model_object_extraction_n1000000_d64_h4_l2_f256_msl64_hold_success",
+                      help='Path to object extraction model')
     parser.add_argument('--language2motion_model_path', type=str,
-                        default="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success")
-
-    # ── Hardware config ──
+                      default="models/model_language2motion_n1000000_d128_h8_l4_f512_msl64_hold_success",
+                      help='Path to language-to-motion model')
+    
+    # Hardware configuration
     parser.add_argument('--camera_type', type=str, default='inner',
-                        choices=['inner', 'realsense'])
+                      choices=['inner', 'realsense'], help='Camera type (inner or realsense)')
     parser.add_argument('--robot_type', type=str, default='go2',
-                        choices=['go2', 'h1', 'b2'])
-
-    # ── Display (ignored in headless) ──
-    parser.add_argument('--show_video', action='store_true', default=True)
-    parser.add_argument('--show_max_result', action='store_true', default=True)
-    parser.add_argument('--show_arrowed', action='store_true', default=False)
-
-    # ── Algorithm ──
-    parser.add_argument('--threshold', type=float, default=10.0)
-    parser.add_argument('--lengthen_filter', type=int, default=1)
-    parser.add_argument('--simulation_mode', action='store_true', default=False)
-    parser.add_argument('--socialnav_enabled', action='store_true', default=False)
-    parser.add_argument('--image_width', type=int, default=640)
-    parser.add_argument('--network_device', type=str, default="enx00e06c79d1cb")
-    parser.add_argument('--crowdnav_sim_mode', action='store_true', default=False)
-    parser.add_argument('--env_config', type=str, default='configs/env_lovon.config')
-    parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config')
-    parser.add_argument('--robot_theta', type=float, default=None)
-    parser.add_argument('--show_bezier_pts', action='store_true', default=False)
+                      choices=['go2', 'h1', 'b2'], help='Robot type (go2, h1, or b2)')
+    
+    # Display options
+    parser.add_argument('--show_video', action='store_true', default=True,
+                      help='Show video stream')
+    parser.add_argument('--show_max_result', action='store_true', default=True,
+                      help='Show detection results')
+    parser.add_argument('--show_arrowed', action='store_true', default=False,
+                      help='Show direction arrows')
+    
+    # Algorithm parameters
+    parser.add_argument('--threshold', type=float, default=10.0,
+                      help='Blur detection threshold')
+    parser.add_argument('--lengthen_filter', type=int, default=1,
+                      help='Number of historical detection results to keep')
+    
+    # Added parameters
+    parser.add_argument('--simulation_mode', action='store_true', default=False,
+                  help='Run in simulation mode (webcam + print commands)')
+    parser.add_argument('--socialnav_enabled', action='store_true', default=False,
+                  help='Enable social navigation adjustments')
+    parser.add_argument('--image_width', type=int, default=640,
+                      help='Width of input images')
+    parser.add_argument('--network_device', type=str, default="enx00e06c79d1cb",
+                      help='Netowrk Card')
+    parser.add_argument('--crowdnav_sim_mode', action='store_true', default=False,
+                help='take input data from CrowdNav simulator')
+    parser.add_argument('--env_config', type=str, default='configs/env_lovon.config',
+                help='CrowdNav environment config file (crowdnav_sim_mode)')
+    parser.add_argument('--policy_config', type=str, default='configs/policy_lovon.config',
+                help='CrowdNav policy config file (crowdnav_sim_mode)')
+    parser.add_argument('--robot_theta', type=float, default=None,
+                help='Initial robot heading in radians (crowdnav_sim_mode, default: pi/2)')
+    parser.add_argument('--show_bezier_pts', action='store_true', default=False,
+                help='Display Bezier control points on BEV and CrowdNav views')
     parser.add_argument('--disable_human_traj_pred', action='store_true', default=False,
-                        help='Disable human trajectory prediction, use only gaussian for safety calculation')
-
-    # ── Robot policy selection ──
-    parser.add_argument('--robot_policy', type=str, default='vla',
-                        choices=['vla', 'orca', 'sarl', 'lstm_rl', 'cadrl'],
-                        help='Robot navigation policy. "vla" uses L2MM model, others use CrowdNav policies')
-    parser.add_argument('--crowdnav_model_path', type=str, default=None,
-                        help='Path to trained .pth weights for SARL/LSTM_RL/CADRL')
-    parser.add_argument('--crowdnav_policy_config', type=str, default=None,
-                        help='Policy config matching the trained weights (kinematics, network dims). '
-                             'Defaults to --policy_config if not set.')
+                help='Disable human trajectory prediction, use only gaussian for safety calculation')
 
     # ── Safety Gaussian shape params ──
     parser.add_argument('--safety_sigma', type=float, default=None,
@@ -1825,27 +1390,29 @@ if __name__ == "__main__":
     parser.add_argument('--safety_h_traj_scale', type=float, default=None,
                         help='Per-step H multiplier along trajectory. '
                              '<1 = peak shrinks, 1 = unchanged, >1 = peak grows. Default: 1.0')
-
-    # ── Social navigator params (shield / SFM / prediction) ──
-    parser.add_argument('--shield_thresh_on', type=float, default=None,
-                        help='Safety score below this activates shield. Default: 0.7')
-    parser.add_argument('--shield_thresh_off', type=float, default=None,
-                        help='Safety score above this deactivates shield. Default: 0.8')
-    parser.add_argument('--vx_sfm_gain', type=float, default=None,
-                        help='SFM forward velocity gain. Default: 3.0')
-    parser.add_argument('--human_pred_s', type=float, default=None,
-                        help='Human trajectory prediction horizon in seconds. Default: 5.0')
-
     args = parser.parse_args()
 
-    if args.headless:
-        args.crowdnav_sim_mode = True
-        _import_headless_deps()
-        runner = HeadlessRunner(args)
-        runner.run()
-    else:
-        _import_gui_deps()
-        controller = VisualLanguageController(args)
-        controller.run()
-
+    human_traj_pred = not args.disable_human_traj_pred
+    # Initialize and run controller
+    controller = VisualLanguageController(
+        yolo_model_dir=args.yolo_model_dir,
+        yolo_pose_model_dir=args.yolo_pose_model_dir,
+        tokenizer_path=args.tokenizer_path,
+        object_extraction_model_path=args.object_extraction_model_path,
+        language2motion_model_path=args.language2motion_model_path,
+        camera_type=args.camera_type,
+        robot_type=args.robot_type,
+        show_video=args.show_video,
+        show_max_result=args.show_max_result,
+        show_arrowed=args.show_arrowed,
+        blur_threshold=args.threshold,
+        lengthen_filter=args.lengthen_filter,
+        simulation_mode=args.simulation_mode,
+        socialnav_enabled=args.socialnav_enabled,
+        network_device=args.network_device, 
+        crowdnav_sim_mode=args.crowdnav_sim_mode,
+        robot_theta=args.robot_theta,
+        human_traj_pred=human_traj_pred
+    )
+    controller.run()
     print("Program terminated.")

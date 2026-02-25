@@ -116,8 +116,42 @@ def main():
               f"success={ds:+.1%}  collision={dc:+.1%}  "
               f"danger={dd:+.1f}  min_dist={dm:+.3f}")
 
+    # ── 1b. By robot policy (if column exists) ─────────────────────────
+    if "robot_policy" in df.columns and df["robot_policy"].nunique() > 1:
+        section("By Robot Policy")
+        header_line()
+        for pol in sorted(df["robot_policy"].unique()):
+            grp = df[df["robot_policy"] == pol]
+            print(summary_row(f"policy={pol}", grp))
+
+        # Further: robot_policy × socialnav
+        section("Robot Policy x SocialNav")
+        header_line()
+        for pol in sorted(df["robot_policy"].unique()):
+            subset = df[df["robot_policy"] == pol]
+            for sn_enabled in [False, True]:
+                grp = subset[subset["socialnav_enabled"] == sn_enabled]
+                if len(grp) == 0:
+                    continue
+                sn_tag = "ON " if sn_enabled else "OFF"
+                print(summary_row(f"{pol}  sn={sn_tag}", grp))
+            sn_on = subset[subset["socialnav_enabled"] == True]
+            sn_off = subset[subset["socialnav_enabled"] == False]
+            if len(sn_on) > 0 and len(sn_off) > 0:
+                ds = sn_on["success_rate"].mean() - sn_off["success_rate"].mean()
+                dc = sn_on["collision_rate"].mean() - sn_off["collision_rate"].mean()
+                dd = sn_on["avg_danger_count"].mean() - sn_off["avg_danger_count"].mean()
+                sign_s = GREEN if ds > 0 else (RED if ds < 0 else DIM)
+                sign_c = GREEN if dc < 0 else (RED if dc > 0 else DIM)
+                print(f"  {'  Δ (ON-OFF)':<32s}        "
+                      f"{sign_s}{ds:+6.1%}{RESET}         "
+                      f"{sign_c}{dc:+6.1%}{RESET}  "
+                      f"{dd:+5.1f}")
+            print()
+
     # ── 2. Breakdown by each sweep variable, split by socialnav ───────
     sweep_cols = [
+        ("robot_policy",    "Robot Policy"),
         ("human_policy",    "Human Policy"),
         ("human_num",       "Human Count"),
         ("human_v_pref",    "Human Speed"),

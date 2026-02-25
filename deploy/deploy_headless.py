@@ -92,6 +92,10 @@ from models.api_object_extraction import SequenceToSequenceClassAPI
 from models.api_language2mostion import MotionPredictor
 from models.api_social_navigator import SocialNavigator
 from crowd_sim.envs.utils.info import Collision, Danger, ReachGoal, Timeout
+from crowd_sim.envs.utils.state import JointState
+
+# CrowdNav policy choices (non-VLA)
+CROWDNAV_POLICIES = ("orca", "sarl", "lstm_rl", "cadrl")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -104,21 +108,27 @@ class HeadlessRunner:
     def __init__(self, args):
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.robot_policy_name = getattr(args, "robot_policy", "vla")
 
-        # ── Models ──
-        self.object_extractor = SequenceToSequenceClassAPI(
-            model_path=args.object_extraction_model_path,
-            tokenizer_path=args.tokenizer_path,
-        )
-        self.motion_predictor = MotionPredictor(
-            model_path=args.language2motion_model_path,
-            tokenizer_path=args.tokenizer_path,
-        )
-
-        # ── Mission ──
-        self.mission_instruction_0 = args.mission_instruction
-        self.mission_instruction_1 = args.mission_instruction
-        self.extracted_object = self.object_extractor.predict(self.mission_instruction_1)
+        # ── Models (only load VLA when needed) ──
+        if self.robot_policy_name == "vla":
+            self.object_extractor = SequenceToSequenceClassAPI(
+                model_path=args.object_extraction_model_path,
+                tokenizer_path=args.tokenizer_path,
+            )
+            self.motion_predictor = MotionPredictor(
+                model_path=args.language2motion_model_path,
+                tokenizer_path=args.tokenizer_path,
+            )
+            self.mission_instruction_0 = args.mission_instruction
+            self.mission_instruction_1 = args.mission_instruction
+            self.extracted_object = self.object_extractor.predict(self.mission_instruction_1)
+        else:
+            self.object_extractor = None
+            self.motion_predictor = None
+            self.mission_instruction_0 = args.mission_instruction
+            self.mission_instruction_1 = args.mission_instruction
+            self.extracted_object = "handbag"
 
         # ── State dicts (same keys deploy.py uses) ──
         self.state = {
@@ -142,6 +152,12 @@ class HeadlessRunner:
         )
         # Skip init_render() — we don't need matplotlib in headless mode
 
+        # ── CrowdNav robot policy (non-VLA) ──
+        self.crowdnav_policy = None
+        if self.robot_policy_name in CROWDNAV_POLICIES:
+            self.crowdnav_policy = self._load_crowdnav_policy(
+                self.robot_policy_name, args)
+
         # ── Social Navigator ──
         sn_kwargs = {
             "image_width": self.crowdnav_provider.image_width,
@@ -159,13 +175,61 @@ class HeadlessRunner:
         }
         # Forward any safety gaussian overrides from CLI
         for key in ("safety_sigma", "safety_h", "safety_gamma",
-                    "safety_sigma_spread", "safety_h_decay"):
+                    "safety_sigma_spread", "safety_h_traj_scale"):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
         self.social_nav = SocialNavigator(
             enabled=args.socialnav_enabled, **sn_kwargs
         )
+
+    # ------------------------------------------------------------------ #
+    #  CrowdNav policy loader
+    # ------------------------------------------------------------------ #
+
+    def _load_crowdnav_policy(self, name, args):
+        """Instantiate and configure a CrowdNav policy by name."""
+        import configparser
+        from crowd_nav.policy.policy_factory import policy_factory
+
+        policy = policy_factory[name]()
+
+        # Use dedicated policy config if provided (must match trained weights),
+        # otherwise fall back to the main policy config.
+        cfg_path = getattr(args, "crowdnav_policy_config", None) or args.policy_config
+        policy_config = configparser.RawConfigParser()
+        policy_config.read(cfg_path)
+        policy.configure(policy_config)
+
+        # ORCA needs time_step set explicitly
+        if hasattr(policy, 'time_step') and policy.time_step is None:
+            policy.time_step = self.crowdnav_provider.time_step
+
+        if policy.trainable:
+            model_path = getattr(args, "crowdnav_model_path", None)
+            if model_path is None:
+                raise ValueError(
+                    f"--crowdnav_model_path is required for trainable policy '{name}'")
+            policy.set_device(self.device)
+            policy.set_phase("test")
+            policy.get_model().load_state_dict(torch.load(model_path, map_location=self.device))
+            policy.get_model().eval()
+            # RL policies with query_env need the env reference
+            if getattr(policy, 'query_env', False):
+                policy.set_env(self.crowdnav_provider.env)
+
+        # Sync robot kinematics with the policy so env.step() and
+        # onestep_lookahead() accept the same action type the policy emits.
+        policy_kin = getattr(policy, 'kinematics', None)
+        if policy_kin and policy_kin != self.crowdnav_provider.kinematics:
+            print(f"  Overriding robot kinematics: "
+                  f"{self.crowdnav_provider.kinematics} → {policy_kin}")
+            self.crowdnav_provider.robot.kinematics = policy_kin
+            self.crowdnav_provider.kinematics = policy_kin
+
+        print(f"Loaded CrowdNav policy: {name}  trainable={policy.trainable}  "
+              f"kinematics={getattr(policy, 'kinematics', '?')}")
+        return policy
 
     # ------------------------------------------------------------------ #
     #  Single episode
@@ -194,7 +258,10 @@ class HeadlessRunner:
         termination_reason = "max_steps"
 
         while step_count < max_steps:
-            synthetic = self.crowdnav_provider.step(self.motion_vector)
+            if self.crowdnav_policy is not None:
+                synthetic = self._crowdnav_step(self.motion_vector)
+            else:
+                synthetic = self.crowdnav_provider.step(self.motion_vector)
             if synthetic is None:
                 break
             step_count += 1
@@ -258,17 +325,24 @@ class HeadlessRunner:
     # ------------------------------------------------------------------ #
 
     def _update_motion_control(self, state, lidar_cloud=None):
-        input_data = {
-            "mission_instruction_0": self.mission_instruction_0,
-            "mission_instruction_1": self.mission_instruction_1,
-            **state,
-        }
-        prediction = self.motion_predictor.predict(input_data)
-        self.state["mission_state_in"] = prediction["predicted_state"]
-        self.state["search_state_in"] = prediction["search_state"]
-        self.motion_vector = prediction["motion_vector"]
-        if self.state["mission_state_in"] == "success":
-            self.motion_vector = [0.0, 0.0, 0.0]
+        if self.crowdnav_policy is not None:
+            # ── CrowdNav policy path ──
+            self.motion_vector = self._crowdnav_policy_action()
+            # Keep mission state as "running" so the shield can engage
+            self.state["mission_state_in"] = "running"
+        else:
+            # ── VLA (L2MM) path ──
+            input_data = {
+                "mission_instruction_0": self.mission_instruction_0,
+                "mission_instruction_1": self.mission_instruction_1,
+                **state,
+            }
+            prediction = self.motion_predictor.predict(input_data)
+            self.state["mission_state_in"] = prediction["predicted_state"]
+            self.state["search_state_in"] = prediction["search_state"]
+            self.motion_vector = prediction["motion_vector"]
+            if self.state["mission_state_in"] == "success":
+                self.motion_vector = [0.0, 0.0, 0.0]
 
         bbox = self.state.get("bounding_box")
         bbox_h = (bbox[3] - bbox[1]) if bbox else None
@@ -280,6 +354,88 @@ class HeadlessRunner:
             mission_state=self.state["mission_state_in"],
             lidar_ranges=lidar_cloud,
         )
+
+    def _crowdnav_policy_action(self):
+        """Get action from CrowdNav policy → body-frame [vx, vy, wz].
+
+        Also stores self._last_crowdnav_action so _crowdnav_step() can
+        feed the *original* action type directly to env.step(), avoiding
+        a lossy world→body→world round-trip.
+        """
+        robot = self.crowdnav_provider.robot
+        self_state = robot.get_full_state()
+        human_states = self.crowdnav_provider.ob
+        if human_states is None:
+            self._last_crowdnav_action = None
+            return [0.0, 0.0, 0.0]
+
+        joint_state = JointState(self_state, human_states)
+        action = self.crowdnav_policy.predict(joint_state)
+        self._last_crowdnav_action = action
+
+        # Convert to body-frame [vx, vy, wz] for the SocialNav shield
+        from crowd_sim.envs.utils.action import ActionXY, ActionRot, ActionXYRot
+        if isinstance(action, ActionXYRot):
+            return [action.vx, action.vy, action.wz]
+        elif isinstance(action, ActionXY):
+            cos_t = np.cos(-self_state.theta)
+            sin_t = np.sin(-self_state.theta)
+            vx_body = action.vx * cos_t - action.vy * sin_t
+            vy_body = action.vx * sin_t + action.vy * cos_t
+            return [float(vx_body), float(vy_body), 0.0]
+        elif isinstance(action, ActionRot):
+            wz = action.r / self.crowdnav_provider.time_step if self.crowdnav_provider.time_step > 0 else 0.0
+            return [float(action.v), 0.0, float(wz)]
+        else:
+            return [0.0, 0.0, 0.0]
+
+    def _crowdnav_step(self, motion_vector):
+        """Step the CrowdNav env using a body-frame motion_vector.
+
+        When socialnav is disabled (motion_vector unchanged from policy output),
+        we feed the original CrowdNav action directly to env.step() to avoid
+        conversion artifacts.  When socialnav modulated the vector, we convert
+        the body-frame vector back to a world-frame action for the env.
+        """
+        from crowd_sim.envs.utils.action import ActionXY, ActionRot, ActionXYRot
+
+        env = self.crowdnav_provider.env
+        robot = self.crowdnav_provider.robot
+        self_state = robot.get_full_state()
+        kin = getattr(self.crowdnav_policy, 'kinematics', 'holonomic')
+
+        # Convert body-frame [vx, vy, wz] → world-frame CrowdNav action
+        vx_b, vy_b, wz = motion_vector
+        if kin == "holonomic":
+            cos_t = np.cos(self_state.theta)
+            sin_t = np.sin(self_state.theta)
+            vx_w = vx_b * cos_t - vy_b * sin_t
+            vy_w = vx_b * sin_t + vy_b * cos_t
+            action = ActionXY(float(vx_w), float(vy_w))
+        elif kin == "unicycle":
+            r = wz * self.crowdnav_provider.time_step
+            action = ActionRot(float(np.hypot(vx_b, vy_b)), float(r))
+        else:  # unicycle_xyrot
+            action = ActionXYRot(float(vx_b), float(vy_b), float(wz))
+
+        ob, reward, done, info = env.step(action)
+        self.crowdnav_provider.ob = ob
+        self.crowdnav_provider.done = done
+
+        human_states = ob
+        self.crowdnav_provider._robot_trajectory.append(
+            (self_state.px, self_state.py))
+        humans_rf = self.crowdnav_provider._humans_to_robot_frame(
+            robot.get_full_state(), human_states)
+
+        return {
+            "lidar": self.crowdnav_provider._generate_synthetic_lidar(humans_rf),
+            "pose_state": self.crowdnav_provider._generate_synthetic_pose_state(humans_rf),
+            "object_state": self.crowdnav_provider._generate_synthetic_object_state(
+                robot.get_full_state()),
+            "done": done,
+            "info": info,
+        }
 
     # ------------------------------------------------------------------ #
     #  Batch run
@@ -331,6 +487,7 @@ class HeadlessRunner:
         batch_row = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "num_episodes": num_episodes,
+            "robot_policy": self.robot_policy_name,
             "socialnav_enabled": self.args.socialnav_enabled,
             "human_traj_pred": not self.args.disable_human_traj_pred,
             "robot_theta": self.args.robot_theta,
@@ -365,18 +522,12 @@ class HeadlessRunner:
 
 
 def _run_gui(args):
-    """Fall back to the original deploy.py GUI path."""
-    # Re-use the original deploy.py module directly
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "deploy_gui", os.path.join(current_dir, "deploy.py")
-    )
-    mod = importlib.util.find_module
-    # Simpler: just exec deploy.py's __main__ block via subprocess-like reimport
-    # But the cleanest approach is to just call the original file.
-    # Since deploy.py reads `args` from its own argparse at module level,
-    # we delegate by running it as a subprocess with the same CLI args.
-    import subprocess
+    """Fall back to the original deploy.py GUI path.
+
+    Since deploy.py reads args from its own argparse at module level,
+    we delegate by exec-ing it as a new process with the same CLI args
+    (minus headless-only flags).
+    """
     cmd = [sys.executable, os.path.join(current_dir, "deploy.py")] + _strip_headless_args(sys.argv[1:])
     os.execvp(sys.executable, cmd)
 
@@ -385,7 +536,10 @@ def _strip_headless_args(argv):
     """Remove headless-only arguments before forwarding to deploy.py."""
     skip_next = False
     out = []
-    headless_flags = {"--headless", "--num_episodes", "--max_steps", "--mission_instruction"}
+    headless_flags = {
+        "--headless", "--num_episodes", "--max_steps", "--mission_instruction",
+        "--csv_path", "--robot_policy", "--crowdnav_model_path", "--crowdnav_policy_config",
+    }
     for i, arg in enumerate(argv):
         if skip_next:
             skip_next = False
@@ -460,6 +614,16 @@ if __name__ == "__main__":
     parser.add_argument('--disable_human_traj_pred', action='store_true', default=False,
                         help='Disable human trajectory prediction, use only gaussian for safety calculation')
 
+    # ── Robot policy selection ──
+    parser.add_argument('--robot_policy', type=str, default='vla',
+                        choices=['vla', 'orca', 'sarl', 'lstm_rl', 'cadrl'],
+                        help='Robot navigation policy. "vla" uses L2MM model, others use CrowdNav policies')
+    parser.add_argument('--crowdnav_model_path', type=str, default=None,
+                        help='Path to trained .pth weights for SARL/LSTM_RL/CADRL')
+    parser.add_argument('--crowdnav_policy_config', type=str, default=None,
+                        help='Policy config matching the trained weights (kinematics, network dims). '
+                             'Defaults to --policy_config if not set.')
+
     # ── Safety Gaussian shape params ──
     parser.add_argument('--safety_sigma', type=float, default=None,
                         help='Gaussian width at human current position (meters). Default: 2.0')
@@ -470,9 +634,9 @@ if __name__ == "__main__":
                              '<1 = danger fades, 1 = constant, >1 = danger grows. Default: 1.01')
     parser.add_argument('--safety_sigma_spread', type=float, default=None,
                         help='Sigma growth per prediction step (meters/step). Default: 0.1')
-    parser.add_argument('--safety_h_decay', type=float, default=None,
-                        help='Per-step H decay multiplier along trajectory. '
-                             '<1 = peak shrinks, 1 = unchanged. Default: 1.0')
+    parser.add_argument('--safety_h_traj_scale', type=float, default=None,
+                        help='Per-step H multiplier along trajectory. '
+                             '<1 = peak shrinks, 1 = unchanged, >1 = peak grows. Default: 1.0')
 
     args = parser.parse_args()
 

@@ -3,6 +3,7 @@
 #  Social-LOVON headless evaluation sweep
 #
 #  Iterates over:
+#    - robot policy (vla / orca / sarl / …)
 #    - socialnav enabled / disabled
 #    - robot_theta
 #    - human_num
@@ -28,6 +29,16 @@ POLICY_CONFIG="$PROJECT_ROOT/configs/policy_lovon.config"
 cd "$PROJECT_ROOT"
 
 # ── Sweep parameters (edit these) ──
+# Robot policies to compare.  "vla" uses L2MM; others use CrowdNav policies.
+# For trainable policies (sarl, lstm_rl, cadrl), set the model path and
+# policy config that matches the trained weights below.
+ROBOT_POLICIES=("vla" "orca")
+# ROBOT_POLICIES=("vla" "orca" "sarl")   # uncomment to include SARL
+
+# Trained-policy settings (only used when policy != vla and != orca)
+CROWDNAV_MODEL_PATH="/home/ubuntu/VLA/crowdnav/py38/CrowdNav/crowd_nav/data/output/rl_model.pth"
+CROWDNAV_POLICY_CONFIG="/home/ubuntu/VLA/crowdnav/py38/CrowdNav/crowd_nav/data/output/policy.config"
+
 SOCIALNAV_FLAGS=("" "--socialnav_enabled")          # disabled / enabled
 ROBOT_THETAS=(1.5708 0.7854 3.1416)                 # pi/2, pi/4, pi  (radians)
 HUMAN_NUMS=(1 2 3 5)
@@ -66,7 +77,7 @@ make_env_config() {
 
 # ── Sweep ──
 RUN=0
-TOTAL=$(( ${#SOCIALNAV_FLAGS[@]} * ${#ROBOT_THETAS[@]} * ${#HUMAN_NUMS[@]} * ${#HUMAN_SPEEDS[@]} * ${#HUMAN_POLICIES[@]} * ${#TRAJ_PRED_FLAGS[@]} * ${#ROBOT_SPEEDS[@]} ))
+TOTAL=$(( ${#ROBOT_POLICIES[@]} * ${#SOCIALNAV_FLAGS[@]} * ${#ROBOT_THETAS[@]} * ${#HUMAN_NUMS[@]} * ${#HUMAN_SPEEDS[@]} * ${#HUMAN_POLICIES[@]} * ${#TRAJ_PRED_FLAGS[@]} * ${#ROBOT_SPEEDS[@]} ))
 
 echo "============================================================"
 echo "  Social-LOVON evaluation sweep"
@@ -75,45 +86,54 @@ echo "  Results: ${RESULTS_DIR}"
 echo "============================================================"
 echo ""
 
-for SOCIALNAV in "${SOCIALNAV_FLAGS[@]}"; do
-    for THETA in "${ROBOT_THETAS[@]}"; do
-        for NHUMANS in "${HUMAN_NUMS[@]}"; do
-            for SPEED in "${HUMAN_SPEEDS[@]}"; do
-                for HPOLICY in "${HUMAN_POLICIES[@]}"; do
-                    for TRAJPRED in "${TRAJ_PRED_FLAGS[@]}"; do
-                        for RSPEED in "${ROBOT_SPEEDS[@]}"; do
+for RPOLICY in "${ROBOT_POLICIES[@]}"; do
+    # Build extra args for CrowdNav trained policies
+    RPOLICY_ARGS="--robot_policy $RPOLICY"
+    if [[ "$RPOLICY" != "vla" && "$RPOLICY" != "orca" ]]; then
+        RPOLICY_ARGS="$RPOLICY_ARGS --crowdnav_model_path $CROWDNAV_MODEL_PATH"
+        RPOLICY_ARGS="$RPOLICY_ARGS --crowdnav_policy_config $CROWDNAV_POLICY_CONFIG"
+    fi
 
-                            RUN=$((RUN + 1))
-                            SN_LABEL=$( [[ -n "$SOCIALNAV" ]] && echo "on" || echo "off" )
-                            TP_LABEL=$( [[ -z "$TRAJPRED" ]] && echo "tpOn" || echo "tpOff" )
-                            TAG="sn${SN_LABEL}_theta${THETA}_h${NHUMANS}_hspd${SPEED}_${HPOLICY}_${TP_LABEL}_rspd${RSPEED}"
+    for SOCIALNAV in "${SOCIALNAV_FLAGS[@]}"; do
+        for THETA in "${ROBOT_THETAS[@]}"; do
+            for NHUMANS in "${HUMAN_NUMS[@]}"; do
+                for SPEED in "${HUMAN_SPEEDS[@]}"; do
+                    for HPOLICY in "${HUMAN_POLICIES[@]}"; do
+                        for TRAJPRED in "${TRAJ_PRED_FLAGS[@]}"; do
+                            for RSPEED in "${ROBOT_SPEEDS[@]}"; do
 
-                            MISSION="move to the handbag at speed of ${RSPEED} m/s"
+                                RUN=$((RUN + 1))
+                                SN_LABEL=$( [[ -n "$SOCIALNAV" ]] && echo "on" || echo "off" )
+                                TP_LABEL=$( [[ -z "$TRAJPRED" ]] && echo "tpOn" || echo "tpOff" )
+                                TAG="${RPOLICY}_sn${SN_LABEL}_theta${THETA}_h${NHUMANS}_hspd${SPEED}_${HPOLICY}_${TP_LABEL}_rspd${RSPEED}"
 
-                            PCT=$(( 100 * (RUN - 1) / TOTAL ))
-                            echo "────────────────────────────────────────────────────"
-                            echo "  [${RUN}/${TOTAL}] (${PCT}%)  ${TAG}"
-                            echo "────────────────────────────────────────────────────"
+                                MISSION="move to the handbag at speed of ${RSPEED} m/s"
 
-                            # Generate temp config
-                            TMP_CONFIG=$(make_env_config "$NHUMANS" "$SPEED" "$HPOLICY")
+                                PCT=$(( 100 * (RUN - 1) / TOTAL ))
+                                echo "────────────────────────────────────────────────────"
+                                echo "  [${RUN}/${TOTAL}] (${PCT}%)  ${TAG}"
+                                echo "────────────────────────────────────────────────────"
 
-                            # Run headless evaluation
-                            python "$DEPLOY" \
-                                --headless \
-                                --num_episodes "$NUM_EPISODES" \
-                                --max_steps "$MAX_STEPS" \
-                                --csv_path "$CSV_PATH" \
-                                --mission_instruction "$MISSION" \
-                                --robot_theta "$THETA" \
-                                --env_config "$TMP_CONFIG" \
-                                --policy_config "$POLICY_CONFIG" \
-                                $SOCIALNAV $TRAJPRED
+                                # Generate temp config
+                                TMP_CONFIG=$(make_env_config "$NHUMANS" "$SPEED" "$HPOLICY")
 
-                            # Clean up temp config
-                            rm -f "$TMP_CONFIG"
+                                # Run headless evaluation
+                                python "$DEPLOY" \
+                                    --headless \
+                                    --num_episodes "$NUM_EPISODES" \
+                                    --max_steps "$MAX_STEPS" \
+                                    --csv_path "$CSV_PATH" \
+                                    --mission_instruction "$MISSION" \
+                                    --robot_theta "$THETA" \
+                                    --env_config "$TMP_CONFIG" \
+                                    --policy_config "$POLICY_CONFIG" \
+                                    $RPOLICY_ARGS $SOCIALNAV $TRAJPRED
 
-                            echo ""
+                                # Clean up temp config
+                                rm -f "$TMP_CONFIG"
+
+                                echo ""
+                            done
                         done
                     done
                 done

@@ -1,0 +1,2 @@
+timestamp,num_episodes,robot_policy,socialnav_enabled,human_traj_pred,robot_theta,human_num,human_v_pref,human_policy,mission_instruction,success_rate,collision_rate,avg_min_distance,avg_danger_count,avg_steps,avg_sim_time,avg_goal_dist,wall_time
+2026-02-25 18:33:32,20,vla,True,True,1.5708,3,1.0,orca,move to the handbag at speed of 0.5 m/s,0.65,0.2,0.2030635836741677,3.1,53.55,10.70999999999999,0.8064394995348708,5.870523218007293
