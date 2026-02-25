@@ -16,7 +16,11 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
-from models.safety import robot_safety_score, compute_safety_grid, safety_score_at_point, _safety_scores
+from models.safety import (
+    robot_safety_score, compute_safety_grid, safety_score_at_point, _safety_scores,
+    SIGMA as _DEF_SIGMA, H as _DEF_H, GAMMA as _DEF_GAMMA,
+    SIGMA_SPREAD as _DEF_SIGMA_SPREAD, H_DECAY as _DEF_H_DECAY,
+)
 
 logger = logging.getLogger("SocialNavigator")
 logger.setLevel(logging.WARNING)
@@ -115,6 +119,12 @@ class SocialNavigator:
         "human_pred_s": 3.0,
         "human_pred_steps": 25,
         "pred_interval": 1,    # predict every frame
+        # --- Safety Gaussian shape ---
+        "safety_sigma": _DEF_SIGMA,               # Gaussian width at current position (m)
+        "safety_h": _DEF_H,                       # peak danger amplitude (0..1)
+        "safety_gamma": _DEF_GAMMA,               # per-step H multiplier along trajectory
+        "safety_sigma_spread": _DEF_SIGMA_SPREAD,  # sigma growth per pred step (m/step)
+        "safety_h_decay": _DEF_H_DECAY,           # per-step H decay along trajectory
         # --- ByteTrack tracker ---
         "track_high_thresh": 0.5,   # confidence >= this → first association
         "track_low_thresh": 0.1,    # confidence >= this → second association
@@ -151,6 +161,16 @@ class SocialNavigator:
     def __init__(self, enabled=False, **kwargs):
         self.enabled = enabled
         self.params = {**self.DEFAULT_PARAMS, **kwargs}
+
+        # Pre-build the dict of safety gaussian kwargs so every call site
+        # stays in sync with the params dict without repetition.
+        self._safety_kw = {
+            "sigma": self.params["safety_sigma"],
+            "h": self.params["safety_h"],
+            "gamma": self.params["safety_gamma"],
+            "sigma_spread": self.params["safety_sigma_spread"],
+            "h_decay": self.params["safety_h_decay"],
+        }
 
         # --- Camera parameters ---
         half_fov_h = math.radians(self.params["fov_deg"] / 2.0)
@@ -984,7 +1004,8 @@ class SocialNavigator:
 
         score = robot_safety_score(0.0, 0.0, human_positions,
                                    human_predicted_paths=human_predicted_paths,
-                                   human_traj_pred=self.params["human_traj_pred"])
+                                   human_traj_pred=self.params["human_traj_pred"],
+                                   **self._safety_kw)
 
         logger.debug("safety_score=%.3f", score)
         return score
@@ -1214,7 +1235,8 @@ class SocialNavigator:
             x2, y2 = curve[i+1]
             segment_length = np.linalg.norm([x2 - x, y2 - y])
             safety_at_point = safety_score_at_point(x, y, human_positions, human_predicted_paths,
-                                                       human_traj_pred=human_traj_pred)
+                                                       human_traj_pred=human_traj_pred,
+                                                       **self._safety_kw)
             trajectory_score += safety_at_point * segment_length
             total_length += segment_length
             lowest_safety_val = min(lowest_safety_val, safety_at_point)
@@ -1261,7 +1283,8 @@ class SocialNavigator:
         # One vectorized safety call for all S points.
         safety = _safety_scores(pts[:, 0], pts[:, 1],
                                 _human_positions, _human_predicted_paths,
-                                human_traj_pred=human_traj_pred)  # (S,)
+                                human_traj_pred=human_traj_pred,
+                                **self._safety_kw)  # (S,)
 
         # Segment lengths via vectorized diff + hypot.
         diffs = pts[1:] - pts[:-1]                          # (S-1, 2)
@@ -1680,6 +1703,7 @@ class SocialNavigator:
             num_cells=N,
             human_predicted_paths=human_predicted_paths or None,
             human_traj_pred=human_traj_pred,
+            **self._safety_kw,
         )
         return self.grid, extent
 

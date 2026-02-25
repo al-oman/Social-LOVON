@@ -169,8 +169,8 @@ def main():
                f"hspd={row['human_v_pref']} {row['human_policy']} tp={tp}")
         print(summary_row(tag, pd.DataFrame([row])))
 
-    section("Top 5 Worst Configs (by success rate, then max danger)")
-    worst = df.nsmallest(5, ["success_rate", "avg_min_distance"])
+    section("Top 10 Worst Configs (by success rate, then max danger)")
+    worst = df.nsmallest(10, ["success_rate", "avg_min_distance"])
     for _, row in worst.iterrows():
         sn = "ON" if row["socialnav_enabled"] else "OFF"
         tp = "ON" if row["human_traj_pred"] else "OFF"

@@ -588,6 +588,12 @@ class VisualLanguageController:
             sn_kwargs["lidar_cam_yaw_offset"] = 0.0
             sn_kwargs["mono_k"] = self.crowdnav_provider._fx * 0.3  # match goal_size_m in _generate_synthetic_object_state
             sn_kwargs["human_traj_pred"] = self.human_traj_pred
+        # Forward any safety gaussian overrides from CLI
+        for key in ("safety_sigma", "safety_h", "safety_gamma",
+                    "safety_sigma_spread", "safety_h_decay"):
+            val = getattr(args, key, None)
+            if val is not None:
+                sn_kwargs[key] = val
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
         # self.lidar_window = LidarWindowSide()
@@ -1370,6 +1376,20 @@ if __name__ == "__main__":
                 help='Display Bezier control points on BEV and CrowdNav views')
     parser.add_argument('--disable_human_traj_pred', action='store_true', default=False,
                 help='Disable human trajectory prediction, use only gaussian for safety calculation')
+
+    # ── Safety Gaussian shape params ──
+    parser.add_argument('--safety_sigma', type=float, default=None,
+                        help='Gaussian width at human current position (meters). Default: 2.0')
+    parser.add_argument('--safety_h', type=float, default=None,
+                        help='Peak danger amplitude at distance=0 (0..1). Default: 1.0')
+    parser.add_argument('--safety_gamma', type=float, default=None,
+                        help='Per-step H multiplier along predicted trajectory. '
+                             '<1 = danger fades, 1 = constant, >1 = danger grows. Default: 1.01')
+    parser.add_argument('--safety_sigma_spread', type=float, default=None,
+                        help='Sigma growth per prediction step (meters/step). Default: 0.1')
+    parser.add_argument('--safety_h_decay', type=float, default=None,
+                        help='Per-step H decay multiplier along trajectory. '
+                             '<1 = peak shrinks, 1 = unchanged. Default: 1.0')
     args = parser.parse_args()
 
     human_traj_pred = not args.disable_human_traj_pred
