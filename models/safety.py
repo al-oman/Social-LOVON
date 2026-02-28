@@ -32,7 +32,7 @@ import numpy as np
 SIGMA = 1.0          # Gaussian width at current position (meters)
 H = 1.0              # peak danger at distance=0
 GAMMA = 1.00         # trajectory H multiplier per step
-SIGMA_SPREAD = 0.1   # sigma growth per prediction step (meters/step)
+SIGMA_SPREAD = 0.05   # sigma growth per prediction step (meters/step)
 H_TRAJ_SCALE = 1.00        # per-step H multiplier along trajectory (<1 shrinks, >1 grows)
 
 
@@ -59,7 +59,16 @@ def _gaussian_grid(X, Y, human_positions, sigma=SIGMA, h=H):
 def _trajectory_grid(X, Y, human_predicted_paths,
                      sigma=SIGMA, h=H, gamma=GAMMA,
                      sigma_spread=SIGMA_SPREAD, h_traj_scale=H_TRAJ_SCALE):
-    """Min-over-humans-and-timesteps trajectory threat. Returns array same shape as X."""
+    """Min-over-humans-and-timesteps trajectory threat with anisotropic Gaussians.
+
+    Each waypoint's Gaussian uses the base *sigma* along the trajectory tangent
+    and ``sigma + sigma_spread * (t+1)`` perpendicular to it.  This prevents
+    future-step spread from inflating the field behind (or ahead along) the
+    trajectory — uncertainty only grows laterally.
+
+    For the first waypoint (or when the tangent is degenerate), falls back to
+    an isotropic Gaussian at base sigma.
+    """
     if not human_predicted_paths:
         return np.ones_like(X, dtype=np.float64)
 
@@ -69,12 +78,46 @@ def _trajectory_grid(X, Y, human_predicted_paths,
         if not path:
             continue
         pts = np.asarray(path, dtype=np.float64)  # (T, 2)
-        for t in range(pts.shape[0]):
-            sigma_t = sigma + sigma_spread * (t + 1)
-            inv_2s2_t = 1.0 / (2.0 * sigma_t * sigma_t)
+        T = pts.shape[0]
+        for t in range(T):
             h_t = h * (gamma ** t) * (h_traj_scale ** t)
-            dist_sq = (X - pts[t, 0]) ** 2 + (Y - pts[t, 1]) ** 2
-            s = 1.0 - h_t * np.exp(-dist_sq * inv_2s2_t)
+
+            # Compute tangent direction from adjacent waypoints
+            if T >= 2:
+                if t == 0:
+                    tangent = pts[1] - pts[0]
+                elif t == T - 1:
+                    tangent = pts[T - 1] - pts[T - 2]
+                else:
+                    tangent = pts[t + 1] - pts[t - 1]
+                tang_len = np.sqrt(tangent[0] ** 2 + tangent[1] ** 2)
+            else:
+                tang_len = 0.0
+
+            # Displacement from this waypoint
+            dx = X - pts[t, 0]
+            dy = Y - pts[t, 1]
+
+            if tang_len > 1e-9:
+                # Unit tangent and normal
+                tx, ty = tangent[0] / tang_len, tangent[1] / tang_len
+                # Project displacement onto tangent (along) and normal (perp)
+                d_along = dx * tx + dy * ty
+                d_perp = dx * (-ty) + dy * tx
+
+                sigma_along = sigma
+                sigma_perp = sigma + sigma_spread * (t + 1)
+
+                inv_along = 1.0 / (2.0 * sigma_along * sigma_along)
+                inv_perp = 1.0 / (2.0 * sigma_perp * sigma_perp)
+
+                exponent = d_along ** 2 * inv_along + d_perp ** 2 * inv_perp
+            else:
+                # Degenerate tangent (stationary) — isotropic at base sigma
+                dist_sq = dx ** 2 + dy ** 2
+                exponent = dist_sq / (2.0 * sigma * sigma)
+
+            s = 1.0 - h_t * np.exp(-exponent)
             np.minimum(safety, s, out=safety)
     return safety
 

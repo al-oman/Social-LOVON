@@ -39,20 +39,20 @@ SARL_POLICY_CONFIG = os.path.join(PROJECT_ROOT, "data", "output", "policy_non_ho
 
 # ── Full sweep parameters ──
 ROBOT_POLICIES = ["vla", "orca"]
-CROWDNAV_MODEL_PATH = "/home/ubuntu/VLA/crowdnav/py38/CrowdNav/crowd_nav/data/output/rl_model.pth"
-CROWDNAV_POLICY_CONFIG = "/home/ubuntu/VLA/crowdnav/py38/CrowdNav/crowd_nav/data/output/policy.config"
+CROWDNAV_MODEL_PATH = os.path.join(PROJECT_ROOT, "data", "output", "rl_model.pth")
+CROWDNAV_POLICY_CONFIG = os.path.join(PROJECT_ROOT, "configs", "policy.config")
 
 SOCIALNAV_FLAGS = [False, True]
-ROBOT_THETAS = [1.5708, 0.7854, 3.1416]
-HUMAN_NUMS = [1, 2, 3, 5]
-HUMAN_SPEEDS = [0.5, 1.0, 1.5]
-HUMAN_POLICIES = ["orca", "linear"]
+ROBOT_THETAS = [2.3562, 0.7854, 1.5708]
+HUMAN_NUMS = [1, 2]
+HUMAN_SPEEDS = [1.0]
+HUMAN_POLICIES = ["orca"]
 TRAJ_PRED_FLAGS = [True, False]
-ROBOT_SPEEDS = [0.5, 1.0]
+ROBOT_SPEEDS = [1.0]
 
 # ── Per-run settings ──
 DEFAULT_NUM_EPISODES = 10
-DEFAULT_MAX_STEPS = 500
+DEFAULT_MAX_STEPS = 100
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -199,28 +199,28 @@ COMPARE_CONDITIONS = [
         "socialnav": True,
         "traj_pred": True,
     },
-    {
-        "label": "orca",
-        "robot_policy": "orca",
-        "socialnav": False,
-        "traj_pred": True,
-    },
-    {
-        "label": "sarl",
-        "robot_policy": "sarl",
-        "socialnav": False,
-        "traj_pred": True,
-        "crowdnav_model_path": SARL_MODEL_PATH,
-        "crowdnav_policy_config": SARL_POLICY_CONFIG,
-    },
+    # {
+    #     "label": "orca",
+    #     "robot_policy": "orca",
+    #     "socialnav": False,
+    #     "traj_pred": True,
+    # },
+    # {
+    #     "label": "sarl",
+    #     "robot_policy": "sarl",
+    #     "socialnav": False,
+    #     "traj_pred": True,
+    #     "crowdnav_model_path": SARL_MODEL_PATH,
+    #     "crowdnav_policy_config": SARL_POLICY_CONFIG,
+    # },
 ]
 
 # Environment axes to sweep across in compare mode
-COMPARE_THETAS = [1.5708]
-COMPARE_HUMAN_NUMS = [1, 2, 3, 5]
-COMPARE_HUMAN_SPEEDS = [0.5, 1.0]
-COMPARE_HUMAN_POLICIES = ["orca", "linear"]
-COMPARE_ROBOT_SPEEDS = [0.5]
+COMPARE_THETAS = [0.7854, 1.5708, 2.3562]
+COMPARE_HUMAN_NUMS = [1, 2, 3]
+COMPARE_HUMAN_SPEEDS = [1.0]
+COMPARE_HUMAN_POLICIES = ["orca"]
+COMPARE_ROBOT_SPEEDS = [1.0]
 
 
 def build_compare_sweep():
@@ -303,7 +303,14 @@ def main():
     print("=" * 60)
     print(f"  Social-LOVON evaluation — {mode_label}")
     print(f"  {total} configurations x {args.num_episodes} episodes each")
-    print(f"  Results: {results_dir}")
+    print(f"  Results:      {results_dir}")
+    print(f"  Deploy:       {DEPLOY}")
+    print(f"  Env config:   {BASE_ENV_CONFIG}")
+    print(f"  Policy config:{POLICY_CONFIG}")
+    print(f"  CrowdNav model:  {CROWDNAV_MODEL_PATH}")
+    print(f"  CrowdNav policy: {CROWDNAV_POLICY_CONFIG}")
+    print(f"  SARL model:      {SARL_MODEL_PATH}")
+    print(f"  SARL policy:     {SARL_POLICY_CONFIG}")
     print("=" * 60)
     print()
 

@@ -1,3 +1,6 @@
 timestamp,num_episodes,robot_policy,socialnav_enabled,human_traj_pred,robot_theta,human_num,human_v_pref,human_policy,mission_instruction,success_rate,collision_rate,avg_min_distance,avg_danger_count,avg_steps,avg_sim_time,avg_goal_dist,wall_time
 2026-02-25 17:30:03,100,vla,False,True,0.785,2,1.0,linear,move to the handbag at speed of 0.5 m/s,0.59,0.41,0.12945837114758466,1.47,27.37,5.474000000000001,1.3008060302095346,6.941748537996318
 2026-02-25 17:31:37,25,sarl,False,True,0.785,2,1.0,linear,move to the handbag at speed of 0.5 m/s,0.96,0.04,0.44406279230203183,0.6,27.76,5.552000000000001,0.2863870219682629,61.45217725500697
+2026-02-26 18:10:26,10,vla,True,True,,2,1.0,orca,move to the handbag at speed of 0.5 m/s,1.0,1.0,0.9,0.1,1.0,0.7,0.8,3.0,5.0,1.0,0.3,0.9,0.0,0.4182792634081527,2.1,55.7,11.139999999999992,0.3714101110835578,2.603158349986188
+2026-02-26 18:10:36,10,vla,True,True,,2,1.0,linear,move to the handbag at speed of 0.5 m/s,1.0,1.0,0.9,0.1,1.0,0.7,0.8,3.0,5.0,1.0,0.3,0.9,0.1,0.45845716473644493,0.5,54.8,10.959999999999994,0.34503730945886046,2.4879539019893855
+2026-02-27 14:07:13,2,vla,True,True,0.785,2,1.0,orca,move to the handbag at speed of 1.0 m/s,1.0,1.0,0.95,0.1,1.0,0.7,0.8,5.0,2.0,1.0,0.3,0.5,0.5,-0.003423861401808226,3.5,25.0,5.000000000000002,1.3391791641790705,0.16757587005849928

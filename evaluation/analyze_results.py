@@ -3,7 +3,7 @@
 Analyze eval_results.csv from a Social-LOVON evaluation sweep.
 
 Usage:
-    python evaluation/analyze_results.py <path_to_eval_results.csv>
+    python evaluation/analyze_results.py [path_to_eval_results.csv] [--best-combo]
 
 Displays success/collision/danger metrics grouped by socialnav enabled vs
 disabled, then breaks down by each sweep variable.
@@ -11,6 +11,7 @@ disabled, then breaks down by each sweep variable.
 
 import sys
 import os
+import argparse
 import pandas as pd
 import numpy as np
 
@@ -74,28 +75,112 @@ def header_line():
 
 # ── Main ──────────────────────────────────────────────────────────────
 
+def find_best_combo(df):
+    """Rank all tested parameter combinations by a composite score."""
+    # Identify parameter columns (everything that isn't a metric or metadata)
+    metric_cols = {"success_rate", "collision_rate", "avg_min_distance",
+                   "avg_danger_count", "avg_near_miss", "avg_steps",
+                   "avg_sim_time", "avg_goal_dist", "wall_time", "timestamp",
+                   "num_episodes", "mission_instruction", "robot_speed"}
+    param_cols = [c for c in df.columns if c not in metric_cols and c in df.columns]
+    # Only keep param cols that actually vary
+    param_cols = [c for c in param_cols if df[c].nunique() > 1]
+
+    if not param_cols:
+        print(f"\n  {YELLOW}No varying parameters found — only one configuration in data.{RESET}")
+        return
+
+    grouped = df.groupby(param_cols, dropna=False).agg(
+        success_rate=("success_rate", "mean"),
+        collision_rate=("collision_rate", "mean"),
+        avg_danger_count=("avg_danger_count", "mean"),
+        avg_min_distance=("avg_min_distance", "mean"),
+        avg_steps=("avg_steps", "mean"),
+        avg_goal_dist=("avg_goal_dist", "mean"),
+        n=("success_rate", "count"),
+    ).reset_index()
+
+    # Composite score: reward success & safety distance, penalise collisions & danger
+    grouped["score"] = (
+        grouped["success_rate"]
+        - grouped["collision_rate"]
+        + 0.1 * grouped["avg_min_distance"]
+        - 0.01 * grouped["avg_danger_count"]
+    )
+    grouped = grouped.sort_values("score", ascending=False).reset_index(drop=True)
+
+    section("Best Parameter Combinations (by composite score)")
+    print(f"  {DIM}score = success - collision + 0.1*min_dist - 0.01*danger{RESET}")
+    print()
+    header_line()
+    n_show = min(10, len(grouped))
+    for i in range(n_show):
+        row = grouped.iloc[i]
+        parts = [f"{c}={row[c]}" for c in param_cols]
+        label = "  ".join(parts)
+        # Truncate long labels
+        if len(label) > 30:
+            label = label[:27] + "..."
+        score_str = f"{BOLD}{row['score']:+.3f}{RESET}"
+        print(
+            f"  {f'#{i+1}':<4s} {label:<30s}  n={int(row['n']):>3d}  "
+            f"success={color_pct(row['success_rate'])}  "
+            f"collision={color_pct(row['collision_rate'], invert=True)}  "
+            f"danger={fmt_float(row['avg_danger_count'], '.1f'):>5s}  "
+            f"min_dist={fmt_float(row['avg_min_distance']):>5s}  "
+            f"steps={fmt_float(row['avg_steps'], '.0f'):>4s}  "
+            f"goal_dist={fmt_float(row['avg_goal_dist'])}  "
+            f"score={score_str}"
+        )
+
+    # Print full param breakdown of #1
+    print()
+    best = grouped.iloc[0]
+    section("Best Combination — Full Parameters")
+    for c in param_cols:
+        print(f"  {c:<25s} = {best[c]}")
+    print(f"  {'score':<25s} = {best['score']:.4f}")
+
+
 def main():
-    if len(sys.argv) < 2:
+    cli = argparse.ArgumentParser(
+        description="Analyze eval_results.csv from a Social-LOVON evaluation sweep."
+    )
+    cli.add_argument("csv", nargs="?", default=None,
+                     help="Path to eval_results.csv (auto-detects most recent if omitted)")
+    cli.add_argument("--best-combo", action="store_true",
+                     help="Find the highest-scoring parameter combination and exit")
+    args = cli.parse_args()
+
+    if args.csv:
+        csv_path = args.csv
+    else:
         # Try to find the most recent results CSV
         eval_dir = os.path.join(os.path.dirname(__file__), "results")
+        csv_path = None
         if os.path.isdir(eval_dir):
-            subdirs = sorted(os.listdir(eval_dir))
-            for d in reversed(subdirs):
-                candidate = os.path.join(eval_dir, d, "eval_results.csv")
-                if os.path.isfile(candidate):
-                    csv_path = candidate
+            for d in sorted(os.listdir(eval_dir), reverse=True):
+                for name in ("eval_results.csv", "ablation_results.csv"):
+                    candidate = os.path.join(eval_dir, d, name)
+                    if os.path.isfile(candidate):
+                        csv_path = candidate
+                        break
+                if csv_path:
                     break
-            else:
-                print(f"Usage: {sys.argv[0]} <eval_results.csv>")
-                sys.exit(1)
-        else:
-            print(f"Usage: {sys.argv[0]} <eval_results.csv>")
-            sys.exit(1)
-    else:
-        csv_path = sys.argv[1]
+        if csv_path is None:
+            cli.error("No eval_results.csv or ablation_results.csv found in evaluation/results/")
 
     df = pd.read_csv(csv_path)
     print(f"\n{BOLD}Loaded {len(df)} configurations from:{RESET} {csv_path}")
+
+    # Infer robot speed early so it's available for best-combo
+    if "mission_instruction" in df.columns:
+        df["robot_speed"] = df["mission_instruction"].str.extract(r"(\d+\.?\d*)\s*m/s").astype(float)
+
+    if args.best_combo:
+        find_best_combo(df)
+        print()
+        return
 
     # ── 1. Overall: socialnav ON vs OFF ───────────────────────────────
     section("Social Navigation: ENABLED vs DISABLED")
@@ -151,21 +236,30 @@ def main():
 
     # ── 2. Breakdown by each sweep variable, split by socialnav ───────
     sweep_cols = [
-        ("robot_policy",    "Robot Policy"),
-        ("human_policy",    "Human Policy"),
-        ("human_num",       "Human Count"),
-        ("human_v_pref",    "Human Speed"),
-        ("robot_theta",     "Robot Theta"),
-        ("human_traj_pred", "Traj Prediction"),
+        ("robot_policy",      "Robot Policy"),
+        ("human_policy",      "Human Policy"),
+        ("human_num",         "Human Count"),
+        ("human_v_pref",      "Human Speed"),
+        ("robot_theta",       "Robot Theta"),
+        ("human_traj_pred",   "Traj Prediction"),
+        ("safety_sigma",      "Safety Sigma"),
+        ("safety_h",          "Safety H"),
+        ("safety_gamma",      "Safety Gamma"),
+        ("safety_sigma_spread", "Sigma Spread"),
+        ("safety_h_traj_scale", "H Traj Scale"),
+        ("shield_thresh_on",  "Shield On"),
+        ("shield_thresh_off", "Shield Off"),
+        ("vx_sfm_gain",       "VX SFM Gain"),
+        ("human_pred_s",      "Human Pred S"),
+        ("traj_gradient_gain", "Traj Grad Gain"),
+        ("traj_goal_gain",    "Traj Goal Gain"),
     ]
 
-    # Infer robot speed from mission instruction
-    if "mission_instruction" in df.columns:
-        df["robot_speed"] = df["mission_instruction"].str.extract(r"(\d+\.?\d*)\s*m/s").astype(float)
+    if "robot_speed" in df.columns:
         sweep_cols.append(("robot_speed", "Robot Speed"))
 
     for col, label in sweep_cols:
-        if col not in df.columns:
+        if col not in df.columns or df[col].nunique() <= 1:
             continue
         section(f"By {label} (socialnav ON vs OFF)")
         header_line()

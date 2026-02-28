@@ -98,7 +98,7 @@ class SocialNavigator:
         # "correction_gain": 25.0,
         # "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
         "max_omega_mag": 1.0,
-        "vx_sfm_gain": 3.0,
+        "vx_sfm_gain": 5.0,
         "vy_sfm_gain": 1.0,
         "traj_step_size": 0.2,         # step size in meters for gradient walk
         "traj_gradient_gain": 1.0,     # how strongly the safety gradient nudges each step
@@ -107,7 +107,6 @@ class SocialNavigator:
         "max_traj_curvature": 1.0,
         # Robot pred
         "horizon_s": 2.0,
-        "horizon_steps": 10,
         "path_curvature": 0.45,       # tuned so that predicted robot trajectory matches real one  
         # --- Camera params  ---
         "image_width": 640,
@@ -115,10 +114,9 @@ class SocialNavigator:
         "fov_deg": 80.0,
         "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
         # --- Human Trajectory prediction ---
-        "human_pred_history_steps": 25,
-        "human_pred_s": 5.0,
-        "human_pred_steps": 25,
-        "pred_interval": 1,    # predict every frame
+        "human_pred_history_s": 2.0,
+        "human_pred_s": 4.0,
+        "pred_interval_s": 0.0,    # 0 = every frame
         # --- Safety Gaussian shape ---
         "safety_sigma": _DEF_SIGMA,               # Gaussian width at current position (m)
         "safety_h": _DEF_H,                       # peak danger amplitude (0..1)
@@ -185,14 +183,18 @@ class SocialNavigator:
         self._next_id = 0
         self._byte_tracks = []     # type: List[dict]  # internal ByteTrack state
 
+        # --- Derive step counts from time-based params ---
+        dt = self.params["time_step"]
+        self._horizon_steps = max(1, int(round(self.params["horizon_s"] / dt)))
+        self._pred_history_steps = max(1, int(round(self.params["human_pred_history_s"] / dt)))
+        self._pred_interval = max(1, int(round(self.params["pred_interval_s"] / dt))) if self.params["pred_interval_s"] > 0 else 1
+
         # --- Trajectory predictor ---
-        pred_steps = max(1, int(round(
-            self.params["human_pred_s"] / self.params["time_step"]
-        )))
+        pred_steps = max(1, int(round(self.params["human_pred_s"] / dt)))
         self._predictor = HumanTrajectoryPredictor(
-            history_length=self.params["human_pred_history_steps"],
+            history_length=self._pred_history_steps,
             prediction_steps=pred_steps,
-            prediction_interval=self.params["pred_interval"],
+            prediction_interval=self._pred_interval,
         )
         self._frame_count = 0
 
@@ -1711,7 +1713,7 @@ class SocialNavigator:
         bezier with limited number of steps
         """
         horizon = self.params["horizon_s"]
-        steps = self.params["horizon_steps"]
+        steps = self._horizon_steps
         if self._goal_rf is None:
             return []
 
@@ -1847,14 +1849,21 @@ class SocialNavigator:
         thresh_off = self.params["shield_thresh_off"]
         curvature = self.params.get("path_curvature", 0.5)
 
+        # --- Departure direction: toward goal ---------------------- #
+        departure_dir = goal / goal_dist
+        print(departure_dir)
+
         # --- Departure direction ---------------------------------- #
-        departure_dir = np.array([0.0, 1.0], dtype=np.float64)
-        if self._ego_velocity is not None:
-            bev_x = float(self._ego_velocity[1])   # lateral  → BEV x
-            bev_y = float(self._ego_velocity[0])   # forward  → BEV y
-            v_mag = math.hypot(bev_x, bev_y)
-            if v_mag > 0.01:
-                departure_dir = np.array([bev_x, bev_y], dtype=np.float64) / v_mag
+        # departure_dir = np.array([0.0, 1.0], dtype=np.float64)
+        # if self._ego_velocity is not None:
+        #     bev_x = float(self._ego_velocity[1])   # lateral  → BEV x
+        #     bev_y = float(self._ego_velocity[0])   # forward  → BEV y
+        #     v_mag = math.hypot(bev_x, bev_y)
+        #     if v_mag > 0.01:
+        #         departure_dir = np.array([bev_x, bev_y], dtype=np.float64) / v_mag
+        
+        # print(departure_dir)
+
 
         # --- Grid geometry (mirrors get_safety_heatmap) ----------- #
         bev_range = self.params["bev_range_m"]
@@ -1930,7 +1939,7 @@ class SocialNavigator:
         # for i in range(60):
         #     theta = i * 0.05
         #     result.append([-R * (1 - math.cos(theta)), R * math.sin(theta)])
-        steps = self.params["horizon_steps"]
+        steps = self._horizon_steps
         return result[:steps]
 
 

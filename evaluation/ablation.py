@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import datetime
 import argparse
+import itertools
 
 # ── Paths ──
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,14 +31,14 @@ POLICY_CONFIG = os.path.join(PROJECT_ROOT, "configs", "policy_lovon.config")
 
 # ── Per-run settings ──
 DEFAULT_NUM_EPISODES = 20
-DEFAULT_MAX_STEPS = 500
+DEFAULT_MAX_STEPS = 100
 
 # ── Fixed environment for ablation ──
-ENV_HUMAN_NUM = 3
+ENV_HUMAN_NUM = 2
 ENV_HUMAN_SPEED = 1.0
 ENV_HUMAN_POLICY = "orca"
 ROBOT_THETA = 1.5708
-ROBOT_SPEED = 0.5
+ROBOT_SPEED = 1.0
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Ablation axes — one parameter varied at a time
@@ -49,32 +50,32 @@ ROBOT_SPEED = 0.5
 ABLATION_AXES = {
     "sigma_spread": {
         "flag": "--safety_sigma_spread",
-        "values": [0.0, 0.05, 0.1, 0.2, 0.4],
+        "values": [0.1],
         "default": 0.1,
     },
     "gamma": {
         "flag": "--safety_gamma",
-        "values": [0.8, 0.9, 1.0, 1.1, 1.2],
+        "values": [0.90, 0.95],
         "default": 1.0,
     },
     "shield_thresh_on": {
         "flag": "--shield_thresh_on",
-        "values": [0.4, 0.5, 0.6, 0.7, 0.8],
+        "values": [0.7],
         "default": 0.7,
     },
     "shield_thresh_off": {
         "flag": "--shield_thresh_off",
-        "values": [0.6, 0.7, 0.8, 0.9, 0.95],
+        "values": [0.8],
         "default": 0.8,
     },
     "vx_sfm_gain": {
         "flag": "--vx_sfm_gain",
-        "values": [1.0, 2.0, 3.0, 5.0, 8.0],
+        "values": [5.0, 6.0],
         "default": 3.0,
     },
     "human_pred_s": {
         "flag": "--human_pred_s",
-        "values": [1.0, 2.0, 3.0, 5.0, 8.0],
+        "values": [1.0, 2.0],
         "default": 5.0,
     },
 }
@@ -155,6 +156,29 @@ def build_ablation_sweep(param_names=None):
     return sweep
 
 
+def build_grid_sweep(param_names=None):
+    """Build list of (tag, extra_flags) for every combination of param values."""
+    axes = ABLATION_AXES
+    if param_names:
+        axes = {k: v for k, v in axes.items() if k in param_names}
+
+    names = list(axes.keys())
+    specs = [axes[n] for n in names]
+    value_lists = [s["values"] for s in specs]
+
+    sweep = []
+    for combo in itertools.product(*value_lists):
+        parts = []
+        extra = []
+        for name, spec, val in zip(names, specs, combo):
+            parts.append(f"{name}={val}")
+            extra.extend([spec["flag"], str(val)])
+        tag = "  ".join(parts)
+        sweep.append((tag, extra))
+
+    return sweep
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  CLI
 # ═══════════════════════════════════════════════════════════════════════
@@ -170,20 +194,28 @@ def main():
     parser.add_argument("--params", nargs="+", default=None,
                         choices=list(ABLATION_AXES.keys()),
                         help="Only ablate these parameters (default: all)")
+    parser.add_argument("--grid", action="store_true",
+                        help="Test all combinations of param values instead of one-at-a-time. "
+                             "Use with --params to keep the count tractable.")
     args = parser.parse_args()
 
-    sweep = build_ablation_sweep(args.params)
+    if args.grid:
+        sweep = build_grid_sweep(args.params)
+    else:
+        sweep = build_ablation_sweep(args.params)
     total = len(sweep)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join(SCRIPT_DIR, "results", f"ablation_{timestamp}")
+    mode_tag = "grid" if args.grid else "ablation"
+    results_dir = os.path.join(SCRIPT_DIR, "results", f"{mode_tag}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
     csv_path = os.path.join(results_dir, "ablation_results.csv")
 
     param_label = ", ".join(args.params) if args.params else "all"
+    mode_label = "grid search" if args.grid else "ablation (one-at-a-time)"
 
     print("=" * 60)
-    print(f"  Social-LOVON VLA ablation study")
+    print(f"  Social-LOVON VLA {mode_label}")
     print(f"  Parameters: {param_label}")
     print(f"  {total} configurations x {args.num_episodes} episodes each")
     print(f"  Fixed env: {ENV_HUMAN_NUM} humans, speed {ENV_HUMAN_SPEED}, "

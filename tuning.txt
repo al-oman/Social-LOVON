@@ -1,0 +1,86 @@
+#                       TUNING ROUND 1
+==================================================================
+ABLATION_AXES = {
+    "sigma_spread": {
+        "flag": "--safety_sigma_spread",
+        "values": [0.0, 0.1, 0.3],
+        "default": 0.1,
+    },
+    "gamma": {
+        "flag": "--safety_gamma",
+        "values": [0.8,1.0, 1.2],
+        "default": 1.0,
+    },
+    "shield_thresh_on": {
+        "flag": "--shield_thresh_on",
+        "values": [0.4, 0.6, 0.8],
+        "default": 0.7,
+    },
+    "shield_thresh_off": {
+        "flag": "--shield_thresh_off",
+        "values": [0.5, 0.7, 0.9, 0.95],
+        "default": 0.8,
+    },
+    "vx_sfm_gain": {
+        "flag": "--vx_sfm_gain",
+        "values": [2.0, 3.0, 4.0],
+        "default": 3.0,
+    },
+    "human_pred_s": {
+        "flag": "--human_pred_s",
+        "values": [2.0, 5.0],
+        "default": 5.0,
+    },
+}
+
+safety_gamma              = 1.0
+safety_sigma_spread       = 0.1
+shield_thresh_on          = 0.6
+shield_thresh_off         = 0.5
+vx_sfm_gain               = 4.0
+human_pred_s              = 2.0
+score                     = 0.8415
+
+#                       TUNING ROUND 2
+==================================================================
+ABLATION_AXES = {
+    "sigma_spread": {
+        "flag": "--safety_sigma_spread",
+        "values": [0.05, 0.1, 0.15],
+        "default": 0.1,
+    },
+    "gamma": {
+        "flag": "--safety_gamma",
+        "values": [0.95, 1.0, 1.05],
+        "default": 1.0,
+    },
+    "shield_thresh_on": {
+        "flag": "--shield_thresh_on",
+        "values": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+        "default": 0.7,
+    },
+    "shield_thresh_off": {
+        "flag": "--shield_thresh_off",
+        "values": [0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        "default": 0.8,
+    },
+    "vx_sfm_gain": {
+        "flag": "--vx_sfm_gain",
+        "values": [4.0, 5.0],
+        "default": 3.0,
+    },
+    "human_pred_s": {
+        "flag": "--human_pred_s",
+        "values": [2.0, 3.0],
+        "default": 5.0,
+    },
+}
+
+safety_gamma              = 0.95
+safety_sigma_spread       = 0.1
+shield_thresh_on          = 0.7
+shield_thresh_off         = 0.5
+vx_sfm_gain               = 5.0
+human_pred_s              = 2.0
+score                     = 0.9758
+==================================================================

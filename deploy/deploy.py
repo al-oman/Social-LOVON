@@ -25,6 +25,8 @@ import argparse
 import struct
 import csv
 import datetime
+import re
+import tempfile
 
 import logging
 logging.getLogger('ultralytics').setLevel(logging.ERROR)
@@ -372,7 +374,8 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         for key in ("safety_sigma", "safety_h", "safety_gamma",
                     "safety_sigma_spread", "safety_h_traj_scale",
                     "shield_thresh_on", "shield_thresh_off",
-                    "vx_sfm_gain", "human_pred_s"):
+                    "vx_sfm_gain", "human_pred_s",
+                    "traj_gradient_gain", "traj_goal_gain"):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
@@ -402,6 +405,9 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         collision = False
         min_distance_episode = float('inf')
         danger_count = 0
+        near_miss_count = 0
+        in_near_miss = False
+        near_miss_thresh = 0.2  # meters (edge-to-edge)
         termination_reason = "max_steps"
 
         while step_count < max_steps:
@@ -434,6 +440,14 @@ class HeadlessRunner(CrowdNavPolicyMixin):
                 )
                 min_distance_episode = min(min_distance_episode, dmin_step)
 
+                # Near-miss: entered danger zone without collision
+                if dmin_step < near_miss_thresh and dmin_step > 0:
+                    if not in_near_miss:
+                        near_miss_count += 1
+                        in_near_miss = True
+                else:
+                    in_near_miss = False
+
             self.pose_state = synthetic["pose_state"]
             self.state.update(synthetic["object_state"])
 
@@ -460,6 +474,7 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             "collision": collision,
             "min_distance": min_distance_episode,
             "danger_count": danger_count,
+            "near_miss_count": near_miss_count,
             "termination_reason": termination_reason,
         }
 
@@ -510,11 +525,12 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             res = self._run_episode(ep)
             results.append(res)
             status = "GOAL" if res["reached_goal"] else ("COLL" if res["collision"] else "FAIL")
+            reason = f"  reason={res['termination_reason']}" if status != "GOAL" and self.args.verbose_failures else ""
             print(
                 f"  [{ep+1}/{num_episodes}] {status}  "
                 f"steps={res['steps']}  sim_t={res['sim_time']:.2f}s  "
                 f"wall={res['time_s']:.3f}s  goal_dist={res['final_goal_dist']:.3f}  "
-                f"dmin={res['min_distance']:.3f}  danger={res['danger_count']}"
+                f"dmin={res['min_distance']:.3f}  danger={res['danger_count']}{reason}"
             )
 
         batch_elapsed = time.perf_counter() - batch_t0
@@ -524,12 +540,14 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         collisions = sum(1 for r in results if r["collision"])
         avg_min_dist = np.mean([r["min_distance"] for r in results]) if results else 0
         avg_danger = np.mean([r["danger_count"] for r in results]) if results else 0
+        avg_near_miss = np.mean([r["near_miss_count"] for r in results]) if results else 0
         print(f"\n{'='*60}")
         print(f"  Episodes:   {num_episodes}")
         print(f"  Success:    {goals}/{num_episodes}  ({100*goals/max(num_episodes,1):.1f}%)")
         print(f"  Collisions: {collisions}/{num_episodes}  ({100*collisions/max(num_episodes,1):.1f}%)")
         print(f"  Avg min distance: {avg_min_dist:.3f} m")
         print(f"  Avg danger count: {avg_danger:.1f} steps/episode")
+        print(f"  Avg near misses:  {avg_near_miss:.1f} events/episode")
         print(f"  Wall time: {batch_elapsed:.2f}s  "
               f"({batch_elapsed/max(num_episodes,1):.3f}s / episode)")
         print(f"{'='*60}")
@@ -541,6 +559,8 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         avg_goal_dist = np.mean([r["final_goal_dist"] for r in results]) if results else 0
 
         env_cfg = self.crowdnav_provider.env.config
+        # Record the effective social-nav params (defaults or CLI overrides)
+        sn_params = self.social_nav.params if self.social_nav.enabled else {}
         batch_row = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "num_episodes": num_episodes,
@@ -552,10 +572,22 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             "human_v_pref": env_cfg.getfloat("humans", "v_pref"),
             "human_policy": env_cfg.get("humans", "policy"),
             "mission_instruction": self.args.mission_instruction,
+            "safety_sigma": sn_params.get("safety_sigma", ""),
+            "safety_h": sn_params.get("safety_h", ""),
+            "safety_gamma": sn_params.get("safety_gamma", ""),
+            "safety_sigma_spread": sn_params.get("safety_sigma_spread", ""),
+            "safety_h_traj_scale": sn_params.get("safety_h_traj_scale", ""),
+            "shield_thresh_on": sn_params.get("shield_thresh_on", ""),
+            "shield_thresh_off": sn_params.get("shield_thresh_off", ""),
+            "vx_sfm_gain": sn_params.get("vx_sfm_gain", ""),
+            "human_pred_s": sn_params.get("human_pred_s", ""),
+            "traj_gradient_gain": sn_params.get("traj_gradient_gain", ""),
+            "traj_goal_gain": sn_params.get("traj_goal_gain", ""),
             "success_rate": goals / max(num_episodes, 1),
             "collision_rate": collisions / max(num_episodes, 1),
             "avg_min_distance": avg_min_dist,
             "avg_danger_count": avg_danger,
+            "avg_near_miss": avg_near_miss,
             "avg_steps": avg_steps,
             "avg_sim_time": avg_sim_time,
             "avg_goal_dist": avg_goal_dist,
@@ -894,7 +926,34 @@ class MotionControlThread(threading.Thread):
             else:
                 synthetic = c.crowdnav_provider.step(mv)
             if synthetic is None or synthetic.get("done", False):
-                print("CrowdNav episode finished.")
+                if synthetic is not None and getattr(c.args, 'verbose_failures', False):
+                    info = synthetic.get("info")
+                    from crowd_sim.envs.utils.info import Collision, ReachGoal, Timeout
+                    if isinstance(info, Collision):
+                        reason = "collision"
+                    elif isinstance(info, ReachGoal):
+                        reason = "goal"
+                    elif isinstance(info, Timeout):
+                        reason = "timeout"
+                    else:
+                        reason = "unknown"
+                    robot = c.crowdnav_provider.robot.get_full_state()
+                    humans = c.crowdnav_provider.env.humans
+                    if humans:
+                        dists = [
+                            np.hypot(h.px - robot.px, h.py - robot.py) - h.radius - robot.radius
+                            for h in humans
+                        ]
+                        dmin = min(dists)
+                        closest_idx = dists.index(dmin)
+                        h = humans[closest_idx]
+                        print(f"CrowdNav episode finished: {reason}  "
+                              f"dmin={dmin:.3f}m (human {closest_idx} at "
+                              f"({h.px:.2f},{h.py:.2f}), robot at ({robot.px:.2f},{robot.py:.2f}))")
+                    else:
+                        print(f"CrowdNav episode finished: {reason}")
+                else:
+                    print("CrowdNav episode finished.")
                 c.sim_started = False
                 return
 
@@ -940,6 +999,7 @@ class MotionControlThread(threading.Thread):
 
 class VisualLanguageController(CrowdNavPolicyMixin):
     def __init__(self, args):
+        self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.robot_policy_name = getattr(args, 'robot_policy', 'vla')
         self.crowdnav_sim_mode = args.crowdnav_sim_mode
@@ -1077,7 +1137,8 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         for key in ("safety_sigma", "safety_h", "safety_gamma",
                     "safety_sigma_spread", "safety_h_traj_scale",
                     "shield_thresh_on", "shield_thresh_off",
-                    "vx_sfm_gain", "human_pred_s"):
+                    "vx_sfm_gain", "human_pred_s",
+                    "traj_gradient_gain", "traj_goal_gain"):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
@@ -1134,7 +1195,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         control_frame = Frame(self.instruction_frame)
         control_frame.pack(pady=10, padx=10, anchor='n')
         Button(control_frame, text="Damp",
-               command=lambda: print("Damp command") if self.simulation_mode else self.sport_client.Damp,
+               command=lambda: print("Damp command") if self.simulation_mode else self.sport_client.Damp(),
                font=self.font_style, width=15).pack(side='left', padx=5)
 
         if self.crowdnav_sim_mode:
@@ -1156,7 +1217,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             self.pause_button.pack(pady=5)
 
         initial_instructions = [
-            "move to the handbag at speed of 1.0 m/s"
+            args.mission_instruction
         ]
 
         self.instruction_entries = []
@@ -1801,6 +1862,8 @@ if __name__ == "__main__":
     parser.add_argument('--show_bezier_pts', action='store_true', default=False)
     parser.add_argument('--disable_human_traj_pred', action='store_true', default=False,
                         help='Disable human trajectory prediction, use only gaussian for safety calculation')
+    parser.add_argument('--verbose_failures', action='store_true', default=False,
+                        help='Print termination reason for non-GOAL episodes')
 
     # ── Robot policy selection ──
     parser.add_argument('--robot_policy', type=str, default='vla',
@@ -1836,7 +1899,46 @@ if __name__ == "__main__":
     parser.add_argument('--human_pred_s', type=float, default=None,
                         help='Human trajectory prediction horizon in seconds. Default: 5.0')
 
+    # ── Trajectory planner params ──
+    parser.add_argument('--traj_gradient_gain', type=float, default=None,
+                        help='How strongly the safety gradient nudges each trajectory step. Default: 1.0')
+    parser.add_argument('--traj_goal_gain', type=float, default=None,
+                        help='Attractive force toward goal during gradient walk. Default: 0.3')
+
+    # ── Environment overrides ──
+    parser.add_argument('--robot_speed', type=float, default=None,
+                        help='Robot speed in m/s. Overrides speed in --mission_instruction.')
+    parser.add_argument('--human_speed', type=float, default=None,
+                        help='Human preferred speed (v_pref) in m/s. Overrides env config.')
+    parser.add_argument('--human_policy', type=str, default=None,
+                        choices=['linear', 'orca'],
+                        help='Human navigation policy. Overrides env config.')
+
     args = parser.parse_args()
+
+    # ── Apply speed overrides ──
+    if args.robot_speed is not None:
+        args.mission_instruction = re.sub(
+            r"(\d+\.?\d*)\s*m/s",
+            f"{args.robot_speed} m/s",
+            args.mission_instruction,
+        )
+
+    # Apply env config overrides (each reads the current env_config,
+    # which may already be a temp file from a previous override)
+    for attr, pattern in [
+        ("human_speed",  r"^(v_pref\s*=).*$"),
+        ("human_policy", r"^(policy\s*=).*$"),
+    ]:
+        val = getattr(args, attr, None)
+        if val is not None:
+            with open(args.env_config, "r") as f:
+                text = f.read()
+            text = re.sub(pattern, rf"\g<1> {val}", text, flags=re.MULTILINE)
+            fd, tmp_path = tempfile.mkstemp(prefix="env_lovon_", suffix=".config")
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            args.env_config = tmp_path
 
     if args.headless:
         args.crowdnav_sim_mode = True

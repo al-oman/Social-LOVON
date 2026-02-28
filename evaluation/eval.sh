@@ -36,8 +36,10 @@ ROBOT_POLICIES=("vla" "orca")
 # ROBOT_POLICIES=("vla" "orca" "sarl")   # uncomment to include SARL
 
 # Trained-policy settings (only used when policy != vla and != orca)
-CROWDNAV_MODEL_PATH="/home/ubuntu/VLA/crowdnav/py38/CrowdNav/crowd_nav/data/output/rl_model.pth"
-CROWDNAV_POLICY_CONFIG="/home/ubuntu/VLA/crowdnav/py38/CrowdNav/crowd_nav/data/output/policy.config"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+CROWDNAV_MODEL_PATH="${PROJECT_ROOT}/data/output/rl_model.pth"
+CROWDNAV_POLICY_CONFIG="${PROJECT_ROOT}/configs/policy.config"
 
 SOCIALNAV_FLAGS=("" "--socialnav_enabled")          # disabled / enabled
 ROBOT_THETAS=(1.5708 0.7854 3.1416)                 # pi/2, pi/4, pi  (radians)
