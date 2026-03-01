@@ -29,7 +29,7 @@ import numpy as np
 # ------------------------------------------------------------------
 #  Safety parameter defaults
 # ------------------------------------------------------------------
-SIGMA = 1.0          # Gaussian width at current position (meters)
+SIGMA = 0.75          # Gaussian width at current position (meters)
 H = 1.0              # peak danger at distance=0
 GAMMA = 1.00         # trajectory H multiplier per step
 SIGMA_SPREAD = 0.05   # sigma growth per prediction step (meters/step)
