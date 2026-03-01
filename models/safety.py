@@ -190,5 +190,24 @@ def robot_safety_score(robot_x, robot_y, human_positions,
                                 gamma=gamma, sigma_spread=sigma_spread,
                                 h_traj_scale=h_traj_scale)
 
+def safety_score_along_traj(curve, human_positions,
+                          human_predicted_paths=None, sigma=SIGMA, h=H,
+                          human_traj_pred=True, gamma=GAMMA,
+                          sigma_spread=SIGMA_SPREAD, h_traj_scale=H_TRAJ_SCALE):
+    """Safety score at a single (x, y). Returns float in [0, 1]."""
 
+    min_score = 1.0
+    scores = []
+    for point_x, point_y in curve:
+        score_at_point = _safety_scores(
+            np.float64(point_x), np.float64(point_y),
+            human_positions, human_predicted_paths, sigma, h, human_traj_pred,
+            gamma, sigma_spread, h_traj_scale)
+        scores.append(score_at_point)
+        if score_at_point < min_score:
+            min_score = score_at_point
+    avg_score = sum(scores)/len(scores)
+
+
+    return float(avg_score), float(min_score)
 
