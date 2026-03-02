@@ -204,11 +204,18 @@ COMPARE_CONDITIONS = [
     #     "socialnav": True,
     #     "traj_pred": True,
     # },
+    # {
+    #     "label": "vla_snON_tpOFF",
+    #     "robot_policy": "vla",
+    #     "socialnav": True,
+    #     "traj_pred": False,
+    # },
     {
-        "label": "vla_snON_tpOFF",
+        "label": "vla_snON_novx_tpOFF",
         "robot_policy": "vla",
         "socialnav": True,
         "traj_pred": False,
+        "vx_min": 1.0,
     },
     # {
     #     "label": "vla_snOFF",
