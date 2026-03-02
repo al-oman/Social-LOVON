@@ -199,26 +199,32 @@ COMPARE_CONDITIONS = [
         "socialnav": True,
         "traj_pred": True,
     },
-    {
-        "label": "orca",
-        "robot_policy": "orca",
-        "socialnav": False,
-        "traj_pred": True,
-    },
-    {
-        "label": "sarl",
-        "robot_policy": "sarl",
-        "socialnav": False,
-        "traj_pred": True,
-        "crowdnav_model_path": SARL_MODEL_PATH,
-        "crowdnav_policy_config": SARL_POLICY_CONFIG,
-    },
+    # {
+    #     "label": "vla_snON",
+    #     "robot_policy": "vla",
+    #     "socialnav": True,
+    #     "traj_pred": False,
+    # },
+    # {
+    #     "label": "orca",
+    #     "robot_policy": "orca",
+    #     "socialnav": False,
+    #     "traj_pred": True,
+    # },
+    # {
+    #     "label": "sarl",
+    #     "robot_policy": "sarl",
+    #     "socialnav": False,
+    #     "traj_pred": True,
+    #     "crowdnav_model_path": SARL_MODEL_PATH,
+    #     "crowdnav_policy_config": SARL_POLICY_CONFIG,
+    # },
 ]
 
 # Environment axes to sweep across in compare mode
 COMPARE_THETAS = [0.7854, 1.5708, 2.3562]
-COMPARE_HUMAN_NUMS = [1, 2, 3]
-COMPARE_HUMAN_SPEEDS = [1.0]
+COMPARE_HUMAN_NUMS = [1, 2, 3, 5]
+COMPARE_HUMAN_SPEEDS = [1.0, 1.5]
 COMPARE_HUMAN_POLICIES = ["orca"]
 COMPARE_ROBOT_SPEEDS = [1.0]
 

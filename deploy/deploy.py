@@ -1821,7 +1821,7 @@ if __name__ == "__main__":
                         help="Run without GUI for fast batch evaluation")
     parser.add_argument("--num_episodes", type=int, default=100,
                         help="Number of episodes to run (headless only)")
-    parser.add_argument("--max_steps", type=int, default=500,
+    parser.add_argument("--max_steps", type=int, default=200,
                         help="Max sim steps per episode before timeout")
     parser.add_argument("--csv_path", type=str, default="eval_results.csv",
                         help="Path to append batch summary rows to")

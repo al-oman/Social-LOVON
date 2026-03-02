@@ -37,7 +37,7 @@ DEFAULT_MAX_STEPS = 100
 ENV_HUMAN_NUM = 2
 ENV_HUMAN_SPEED = 1.0
 ENV_HUMAN_POLICY = "orca"
-ROBOT_THETA = 1.5708
+ROBOT_THETA = 0.785
 ROBOT_SPEED = 1.0
 
 # ═══════════════════════════════════════════════════════════════════════
