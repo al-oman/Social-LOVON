@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # ── Arc parameters ─────────────────────────────────────────────────────────────
-ARC_RADIUS       = 2.0       # radius of the circular arc (metres)
+ARC_RADIUS       = 1.0       # radius of the circular arc (metres)
 ARC_SPAN_DEG     = 120.0     # total angular span of the arc (degrees)
 N_POINTS         = 40        # number of dots along the arc
 DOT_SIZE         = 30        # scatter dot size
@@ -12,11 +12,13 @@ SIGMA_ALONG      = 0.3       # sigma parallel to curve (same for all three)
 SIGMA_PERP_FIRST = 0.3       # sigma perpendicular at first point
 SIGMA_PERP_MID   = 0.6       # sigma perpendicular at middle point
 SIGMA_PERP_LAST  = 1.2       # sigma perpendicular at last point
-H                = 1.0       # peak amplitude of each Gaussian
+H_FIRST          = 1.0       # peak amplitude at first point
+H_MID            = 1.0       # peak amplitude at middle point
+H_LAST           = 1.0       # peak amplitude at last point
 
 # ── Heatmap parameters ─────────────────────────────────────────────────────────
-GRID_RESOLUTION  = 200       # grid cells per axis
-COLORMAP         = "hot"     # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
+GRID_RESOLUTION  = 100       # grid cells per axis
+COLORMAP         = "Blues"     # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
 HEATMAP_ALPHA    = 0.85      # opacity of the heatmap underlay
 
 # ── Display ────────────────────────────────────────────────────────────────────
@@ -60,9 +62,9 @@ def main():
     arc_x, arc_y, angles = make_arc(ARC_RADIUS, ARC_SPAN_DEG, N_POINTS)
 
     key_points = [
-        (0,              SIGMA_PERP_FIRST),
-        (N_POINTS // 2,  SIGMA_PERP_MID),
-        (N_POINTS - 1,   SIGMA_PERP_LAST),
+        (0,              SIGMA_PERP_FIRST, H_FIRST),
+        (N_POINTS // 2,  SIGMA_PERP_MID,   H_MID),
+        (N_POINTS - 1,   SIGMA_PERP_LAST,  H_LAST),
     ]
 
     pad = 1.5
@@ -73,10 +75,10 @@ def main():
     X, Y = np.meshgrid(gx, gy)
 
     Z = np.zeros_like(X)
-    for idx, sigma_perp in key_points:
+    for idx, sigma_perp, h in key_points:
         tang = tangent_at(angles, idx)
         Z += gaussian_2d(X, Y, arc_x[idx], arc_y[idx],
-                         tang, SIGMA_ALONG, sigma_perp, H)
+                         tang, SIGMA_ALONG, sigma_perp, h)
 
     fig, ax = plt.subplots(figsize=FIGSIZE)
     im = ax.imshow(Z, origin="lower", extent=[xmin, xmax, ymin, ymax],
@@ -89,7 +91,7 @@ def main():
         ax.scatter(arc_x, arc_y, s=DOT_SIZE, c=DOT_COLOR,
                    edgecolors=DOT_EDGECOLOR, zorder=3)
 
-    for idx, _ in key_points:
+    for idx, *_ in key_points:
         ax.scatter(arc_x[idx], arc_y[idx], s=DOT_SIZE * 3,
                    c="cyan", edgecolors="black", zorder=4)
 

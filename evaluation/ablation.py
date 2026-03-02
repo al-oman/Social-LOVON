@@ -50,12 +50,12 @@ ROBOT_SPEED = 1.0
 ABLATION_AXES = {
     "sigma_spread": {
         "flag": "--safety_sigma_spread",
-        "values": [0.1],
+        "values": [0.01, 0.05,0.1, 0.2],
         "default": 0.1,
     },
     "gamma": {
         "flag": "--safety_gamma",
-        "values": [0.90, 0.95],
+        "values": [0.90, 0.95, 0.98, 1.0, 1.01],
         "default": 1.0,
     },
     "shield_thresh_on": {
