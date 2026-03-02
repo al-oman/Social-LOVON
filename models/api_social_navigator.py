@@ -1041,7 +1041,7 @@ class SocialNavigator:
                                    **self._safety_kw)
 
         logger.debug("avg, min scores=%.3f %.3f", avg_score, min_score)
-        print(f"[compute_safety_score_path] {(time.perf_counter()-_t0)*1000:.2f}ms")
+        # print(f"[compute_safety_score_path] {(time.perf_counter()-_t0)*1000:.2f}ms")
         return avg_score, min_score 
 
 
@@ -1350,7 +1350,7 @@ class SocialNavigator:
     def _update_trajectory_data(self):
         """Compute current-path score and best trajectory. Called once per step()."""
         motion = self._motion_original or [0, 0, 0]
-
+        t0 = time.perf_counter()
         # --- Score the robot's current extrapolated path ---
         try:
             traj = self._extrapolate_robot_trajectory(motion)
@@ -1377,6 +1377,7 @@ class SocialNavigator:
             self._best_traj = None
             self._best_traj_score = self._current_traj_score
 
+        print(f"_update_trajectory_data total time: {(time.perf_counter() - t0)*1000:.2f}ms")
     def _update_diagnostics(self):
         """Read-only: copy previously stored values into self.diag."""
         distances = [
