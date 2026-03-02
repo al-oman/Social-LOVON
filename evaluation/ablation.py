@@ -60,17 +60,17 @@ ABLATION_AXES = {
     },
     "shield_thresh_on": {
         "flag": "--shield_thresh_on",
-        "values": [0.3, 0.5, 0.7],
+        "values": [0.7, 0.8, 0.9 ],
         "default": 0.7,
     },
     "shield_thresh_off": {
         "flag": "--shield_thresh_off",
-        "values": [0.4, 0.6, 0.8, 0.95],
+        "values": [0.8, 0.9, 0.95],
         "default": 0.8,
     },
     "vx_sfm_gain": {
         "flag": "--vx_sfm_gain",
-        "values": [3.0, 5.0, 7.0],
+        "values": [4.0, 5.0, 6.0, 7.0],
         "default": 5.0,
     },
     "human_pred_s": {
