@@ -41,7 +41,7 @@ ROBOT_SPEED = 0.5
 # ── Simulation config axes (cross-product with every hyperparam config) ──
 SIM_CONFIGS = {
     "robot_theta": [0.7854, 2.3562],
-    "human_num":   [2, 3],
+    "human_num":   [2],
 }
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -84,8 +84,8 @@ ABLATION_AXES = {
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
-        "values": [0.5, 1.0, 1.5],
-        "default": 6.0,
+        "values": [1.0, 2.0, 3.0, 4.0],
+        "default": 1.0,
     },
     "traj_step_size": {
         "flag": "--traj_step_size",
@@ -100,7 +100,7 @@ ABLATION_AXES = {
     "traj_goal_gain": {
         "flag": "--traj_goal_gain",
         "values": [1.0, 1.5, 2.0],
-        "default": 0.9,
+        "default": 1.0,
     },
 }
 
