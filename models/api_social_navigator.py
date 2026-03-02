@@ -1937,7 +1937,7 @@ class SocialNavigator:
                 cur.reshape(1, 2), gx_grid, gy_grid, xlim, ylim, x_res, y_res
             )[0]  # shape (2,)
 
-            f_grad = grad_gain *grad
+            # f_grad = grad_gain *grad
 
             # Attractive force toward goal (unit vector from cur to goal)
             to_goal = goal - cur

@@ -36,7 +36,7 @@ DEFAULT_MAX_STEPS = 100
 # ── Fixed environment for ablation ──
 ENV_HUMAN_SPEED = 1.0
 ENV_HUMAN_POLICY = "orca"
-ROBOT_SPEED = 1.0
+ROBOT_SPEED = 0.5
 
 # ── Simulation config axes (cross-product with every hyperparam config) ──
 SIM_CONFIGS = {
@@ -84,7 +84,7 @@ ABLATION_AXES = {
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
-        "values": [3.0, 5.0, 7.0],
+        "values": [0.5, 1.0, 1.5],
         "default": 6.0,
     },
     "traj_step_size": {
@@ -99,7 +99,7 @@ ABLATION_AXES = {
     },
     "traj_goal_gain": {
         "flag": "--traj_goal_gain",
-        "values": [1.5, 2.0, 2.5, 3.0],
+        "values": [1.0, 1.5, 2.0],
         "default": 0.9,
     },
 }
