@@ -47,6 +47,7 @@ def summary_row(label, grp):
     min_d = grp["avg_min_distance"].mean()
     steps = grp["avg_steps"].mean()
     goal_d = grp["avg_goal_dist"].mean()
+    policy_ms = grp["avg_policy_ms"].mean() if "avg_policy_ms" in grp.columns else float("nan")
     return (
         f"  {label:<32s}  n={n:>3d}  "
         f"success={color_pct(succ)}  "
@@ -55,7 +56,8 @@ def summary_row(label, grp):
         f"near_miss={fmt_float(near_miss, '.1f'):>5s}  "
         f"min_dist={fmt_float(min_d):>5s}  "
         f"steps={fmt_float(steps, '.0f'):>4s}  "
-        f"goal_dist={fmt_float(goal_d)}"
+        f"goal_dist={fmt_float(goal_d)}  "
+        f"policy={fmt_float(policy_ms, '.1f'):>6s}ms"
     )
 
 def section(title):
@@ -72,7 +74,8 @@ def header_line():
         f"{'danger':>6s}  "
         f"{'min_d':>8s}  "
         f"{'steps':>5s}  "
-        f"{'goal_d':>9s}"
+        f"{'goal_d':>9s}  "
+        f"{'policy_ms':>9s}"
     )
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -81,7 +84,7 @@ METRIC_COLS = {"success_rate", "collision_rate", "avg_min_distance",
                "avg_danger_count", "avg_near_miss", "avg_steps",
                "avg_sim_time", "avg_goal_dist", "wall_time", "timestamp",
                "num_episodes", "mission_instruction", "robot_speed",
-               "human_num", "robot_theta"}
+               "human_num", "robot_theta", "avg_policy_ms"}
 
 def _varying_param_cols(df):
     return [c for c in df.columns if c not in METRIC_COLS and df[c].nunique() > 1]

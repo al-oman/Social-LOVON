@@ -609,6 +609,7 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             "avg_sim_time": avg_sim_time,
             "avg_goal_dist": avg_goal_dist,
             "wall_time": batch_elapsed,
+            "avg_policy_ms": avg_policy_ms,
         }
         file_exists = os.path.isfile(csv_path)
         with open(csv_path, "a", newline="") as f:
