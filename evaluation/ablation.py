@@ -75,7 +75,7 @@ ABLATION_AXES = {
     },
     "vx_sfm_gain": {
         "flag": "--vx_sfm_gain",
-        "values": [4.0, 5.0, 6.0, 7.0],
+        "values": [0.0, 5.0],
         "default": 5.0,
     },
     "human_pred_s": {
