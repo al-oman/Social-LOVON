@@ -1761,6 +1761,9 @@ class SocialNavigator:
         if goal_dist < 0.05:
             return []
 
+        v_forward = abs(motion_vector[0])
+        max_dist = v_forward * horizon
+
         # Robot heading is always forward in robot frame
         heading = np.array([0.0, 1.0])
 
@@ -1771,8 +1774,15 @@ class SocialNavigator:
         # P2: pull back from goal along direction from p1
         p2 = p3 + p1p3*(1/3)
 
-        full_traj = self._bezier(p0, p1, p2, p3, steps=steps)[:steps]
-        return full_traj
+        # Clip bezier parameter so we only travel max_dist along the curve
+        t_max = min(1.0, max_dist / goal_dist) if max_dist > 0.01 else 0.0
+        if t_max < 0.01:
+            return []
+
+        t = np.linspace(0.0, t_max, steps)[:, None]
+        s = 1.0 - t
+        pts = s**3 * p0 + 3*s**2*t * p1 + 3*s*t**2 * p2 + t**3 * p3
+        return pts.tolist()
 
     @staticmethod
     def _sample_gradient(pts, grad_x, grad_y, xlim, ylim, x_res, y_res=None):
