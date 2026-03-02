@@ -199,12 +199,6 @@ def build_full_sweep():
 # The four conditions to compare
 COMPARE_CONDITIONS = [
     {
-        "label": "vla_snOFF",
-        "robot_policy": "vla",
-        "socialnav": False,
-        "traj_pred": True,
-    },
-    {
         "label": "vla_snON",
         "robot_policy": "vla",
         "socialnav": True,
@@ -215,6 +209,12 @@ COMPARE_CONDITIONS = [
         "robot_policy": "vla",
         "socialnav": True,
         "traj_pred": False,
+    },
+    {
+        "label": "vla_snOFF",
+        "robot_policy": "vla",
+        "socialnav": False,
+        "traj_pred": True,
     },
     {
         "label": "vla_snON_novx",
@@ -240,8 +240,8 @@ COMPARE_CONDITIONS = [
 ]
 
 # Environment axes to sweep across in compare mode
-COMPARE_THETAS = [0.7854, 1.5708, 2.3562]
-COMPARE_HUMAN_NUMS = [1, 2, 3]
+COMPARE_THETAS = [2.094, 1.5708, 1.047]
+COMPARE_HUMAN_NUMS = [1, 2, 3, 5]
 COMPARE_HUMAN_SPEEDS = [1.0]
 COMPARE_HUMAN_POLICIES = ["orca"]
 COMPARE_ROBOT_SPEEDS = [1.0]
@@ -279,6 +279,8 @@ def build_compare_sweep():
                 params["crowdnav_model_path"] = condition["crowdnav_model_path"]
             if "crowdnav_policy_config" in condition:
                 params["crowdnav_policy_config"] = condition["crowdnav_policy_config"]
+            if "vx_min" in condition:
+                params["vx_min"] = condition["vx_min"]
 
             sweep.append(params)
     return sweep
