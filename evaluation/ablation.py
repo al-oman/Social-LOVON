@@ -145,6 +145,13 @@ def run_one(csv_path, num_episodes, max_steps, extra_flags):
         os.unlink(tmp_config)
 
 
+def _default_flags():
+    flags = []
+    for spec in ABLATION_AXES.values():
+        flags.extend([spec["flag"], str(spec["default"])])
+    return flags
+
+
 def build_ablation_sweep(param_names=None):
     """Build list of (tag, extra_flags) for each ablation run.
 
@@ -154,10 +161,10 @@ def build_ablation_sweep(param_names=None):
     if param_names:
         axes = {k: v for k, v in axes.items() if k in param_names}
 
+    base = _default_flags()
     sweep = []
 
-    # Baseline run (all defaults, no extra flags)
-    sweep.append(("baseline", []))
+    sweep.append(("baseline", base))
 
     for param_name, spec in axes.items():
         for val in spec["values"]:
@@ -165,7 +172,7 @@ def build_ablation_sweep(param_names=None):
                 tag = f"{param_name}_{val}_DEFAULT"
             else:
                 tag = f"{param_name}_{val}"
-            extra = [spec["flag"], str(val)]
+            extra = base + [spec["flag"], str(val)]
             sweep.append((tag, extra))
 
     return sweep
@@ -181,6 +188,7 @@ def build_grid_sweep(param_names=None):
     specs = [axes[n] for n in names]
     value_lists = [s["values"] for s in specs]
 
+    base = _default_flags()
     sweep = []
     for combo in itertools.product(*value_lists):
         parts = []
@@ -189,7 +197,7 @@ def build_grid_sweep(param_names=None):
             parts.append(f"{name}={val}")
             extra.extend([spec["flag"], str(val)])
         tag = "  ".join(parts)
-        sweep.append((tag, extra))
+        sweep.append((tag, base + extra))
 
     return sweep
 
