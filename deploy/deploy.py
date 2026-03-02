@@ -412,6 +412,7 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         in_near_miss = False
         near_miss_thresh = 0.2  # meters (edge-to-edge)
         termination_reason = "max_steps"
+        policy_times = []
 
         while step_count < max_steps:
             if self.crowdnav_policy is not None:
@@ -455,7 +456,9 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             self.state.update(synthetic["object_state"])
 
             state_copy = {**self.state}
+            _t = time.perf_counter()
             self._update_motion_control(state_copy, lidar_cloud=synthetic["lidar"])
+            policy_times.append(time.perf_counter() - _t)
 
             if synthetic["done"]:
                 break
@@ -479,6 +482,7 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             "danger_count": danger_count,
             "near_miss_count": near_miss_count,
             "termination_reason": termination_reason,
+            "avg_policy_ms": 1000 * np.mean(policy_times) if policy_times else 0.0,
         }
 
     # ------------------------------------------------------------------ #
@@ -553,6 +557,8 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         print(f"  Avg near misses:  {avg_near_miss:.1f} events/episode")
         print(f"  Wall time: {batch_elapsed:.2f}s  "
               f"({batch_elapsed/max(num_episodes,1):.3f}s / episode)")
+        avg_policy_ms = np.mean([r["avg_policy_ms"] for r in results]) if results else 0.0
+        print(f"  Avg policy time: {avg_policy_ms:.1f} ms/step")
         print(f"{'='*60}")
 
         # ── Append batch summary row to CSV ──

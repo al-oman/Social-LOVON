@@ -11,16 +11,16 @@ ARC_RADIUS       = 3.0    # radius of the circular arc (metres)
 ARC_SPAN_DEG     = 60.0   # total angular span of the arc (degrees)
 N_POINTS         = 10     # number of waypoints along the arc
 DOT_SIZE         = 30     # scatter dot size
-PAD_LEFT         = 3    # padding around arc extents (metres)
-PAD_RIGHT        = 3
+PAD_LEFT         = 4    # padding around arc extents (metres)
+PAD_RIGHT        = 3.5
 PAD_BOTTOM       = 3
-PAD_TOP          = 3
+PAD_TOP          = 4
 
 # ── Safety field parameters (passed directly to safety.py) ─────────────────────
 SIGMA            = 0.75   # Gaussian width at current position (m)
 H                = 1.0    # peak danger amplitude (0..1)
 GAMMA            = 1.05    # per-step H multiplier along trajectory
-SIGMA_SPREAD     = 0.1   # sigma growth per prediction step (m/step)
+SIGMA_SPREAD     = 0.05   # sigma growth per prediction step (m/step)
 H_TRAJ_SCALE     = 1.0   # per-step H scale along trajectory
 
 # ── Heatmap parameters ─────────────────────────────────────────────────────────
