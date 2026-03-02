@@ -43,6 +43,7 @@ def summary_row(label, grp):
     succ = grp["success_rate"].mean()
     coll = grp["collision_rate"].mean()
     danger = grp["avg_danger_count"].mean()
+    near_miss = grp["avg_near_miss"].mean() if "avg_near_miss" in grp.columns else float("nan")
     min_d = grp["avg_min_distance"].mean()
     steps = grp["avg_steps"].mean()
     goal_d = grp["avg_goal_dist"].mean()
@@ -51,6 +52,7 @@ def summary_row(label, grp):
         f"success={color_pct(succ)}  "
         f"collision={color_pct(coll, invert=True)}  "
         f"danger={fmt_float(danger, '.1f'):>5s}  "
+        f"near_miss={fmt_float(near_miss, '.1f'):>5s}  "
         f"min_dist={fmt_float(min_d):>5s}  "
         f"steps={fmt_float(steps, '.0f'):>4s}  "
         f"goal_dist={fmt_float(goal_d)}"
