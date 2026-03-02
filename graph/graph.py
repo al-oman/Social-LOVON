@@ -21,21 +21,22 @@ SIGMA_SPREAD     = 0.1   # sigma growth per prediction step (m/step)
 H_TRAJ_SCALE     = 1.0   # per-step H scale along trajectory
 
 # ── Heatmap parameters ─────────────────────────────────────────────────────────
-GRID_RESOLUTION  = 50    # grid cells per axis
-COLORMAP         = "virlis"  # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
-HEATMAP_ALPHA    = 0.85   # opacity of the heatmap underlay
-SHOW_CONTOURS    = True   # draw contour lines over the heatmap
-N_CONTOURS       = 6      # number of contour levels
+GRID_RESOLUTION  = 400    # grid cells per axis
+COLORMAP         = "viridis"
+N_FILL_LEVELS    = 30     # contourf fill levels
+N_CONTOURS       = 12     # contour line levels
 CONTOUR_COLOR    = "black"
-CONTOUR_ALPHA    = 0.5
-CONTOUR_LINEWIDTH = 0.8
+CONTOUR_LINEWIDTH = 0.6
 
 # ── Display ────────────────────────────────────────────────────────────────────
-FIGSIZE          = (7, 7)
+FIGSIZE          = (5, 4)
+DPI              = 300
 SHOW_COLORBAR    = True
 SHOW_DOTS        = True
 DOT_COLOR        = "white"
 DOT_EDGECOLOR    = "gray"
+SAVE_PDF         = False
+PDF_PATH         = os.path.join(os.path.dirname(__file__), "contour_plot.pdf")
 
 # ── Output ─────────────────────────────────────────────────────────────────────
 SAVE_DAT         = False       # write gnuplot-compatible field.dat
@@ -93,17 +94,15 @@ def main():
                 f.write(f"{x} {y}\n")
         print(f"Saved {TRAJ_PATH}")
 
-    fig, ax = plt.subplots(figsize=FIGSIZE)
-    im = ax.imshow(Z, origin="lower", extent=extent,
-                   cmap=COLORMAP, alpha=HEATMAP_ALPHA, aspect="equal")
+    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI)
 
-    if SHOW_CONTOURS:
-        ax.contour(X, Y, Z, levels=N_CONTOURS,
-                   colors=CONTOUR_COLOR, alpha=CONTOUR_ALPHA,
-                   linewidths=CONTOUR_LINEWIDTH)
+    im = ax.contourf(X, Y, Z, levels=N_FILL_LEVELS, cmap=COLORMAP)
+    ax.contour(X, Y, Z, levels=N_CONTOURS, colors=CONTOUR_COLOR,
+               linewidths=CONTOUR_LINEWIDTH)
 
     if SHOW_COLORBAR:
-        fig.colorbar(im, ax=ax, label="Safety score")
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label("Safety")
 
     if SHOW_DOTS:
         ax.scatter(arc_x, arc_y, s=DOT_SIZE, c=DOT_COLOR,
@@ -113,11 +112,15 @@ def main():
         ax.scatter(arc_x[idx], arc_y[idx], s=DOT_SIZE * 3,
                    c="cyan", edgecolors="black", zorder=4)
 
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("y (m)")
-    ax.set_title("Trajectory Gaussian Safety Field")
-    ax.set_aspect("equal")
+    ax.set_xlabel(r"$x$ (m)")
+    ax.set_ylabel(r"$y$ (m)")
+    ax.set_aspect("equal", "box")
     plt.tight_layout()
+
+    if SAVE_PDF:
+        plt.savefig(PDF_PATH, bbox_inches="tight")
+        print(f"Saved {PDF_PATH}")
+
     plt.show()
 
 

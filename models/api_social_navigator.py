@@ -117,8 +117,8 @@ class SocialNavigator:
         "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
         # --- Human Trajectory prediction ---
         "human_pred_history_s": 2.0,
-        "human_pred_s": 8.0,
-        "human_pred_subsample_s": 1.0,  # seconds between output prediction points
+        "human_pred_s": 4.0,
+        "human_pred_subsample_s": 0.5,  # seconds between output prediction points
         "human_pred_points": 0,         # if nonzero, overrides computed point count directly
         "pred_interval_s": 0.0,         # 0 = every frame
         # --- Safety Gaussian shape ---
