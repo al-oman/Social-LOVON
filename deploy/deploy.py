@@ -562,6 +562,12 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         avg_goal_dist = np.mean([r["final_goal_dist"] for r in results]) if results else 0
 
         env_cfg = self.crowdnav_provider.env.config
+        print("── env config ─────────────────────────────────────────")
+        for section in env_cfg.sections():
+            for key, val in env_cfg.items(section):
+                print(f"  [{section}] {key:<20s} = {val}")
+        print(f"{'='*60}")
+
         # Record the effective social-nav params (defaults or CLI overrides)
         sn_params = self.social_nav.params if self.social_nav.enabled else {}
         batch_row = {
