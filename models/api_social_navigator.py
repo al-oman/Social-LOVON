@@ -1893,7 +1893,7 @@ class SocialNavigator:
 
         # --- Departure direction: toward goal ---------------------- #
         departure_dir = goal / goal_dist
-        print(departure_dir)
+        # print(departure_dir)
 
         # --- Departure direction ---------------------------------- #
         # departure_dir = np.array([0.0, 1.0], dtype=np.float64)

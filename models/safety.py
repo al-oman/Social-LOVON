@@ -197,6 +197,8 @@ def safety_score_along_traj(curve, human_positions,
                           sigma_spread=SIGMA_SPREAD, h_traj_scale=H_TRAJ_SCALE):
     """Safety score at a single (x, y). Returns float in [0, 1]."""
 
+    if not curve:
+        return 1.0, 1.0
     min_score = 1.0
     scores = []
     for point_x, point_y in curve:
