@@ -106,7 +106,7 @@ class SocialNavigator:
         "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
         "max_traj_curvature": 1.0,
         # Robot pred
-        "horizon_s": 2.0,
+        "robot_horizon_s": 2.0,
         "path_curvature": 0.45,       # tuned so that predicted robot trajectory matches real one  
         # --- Camera params  ---
         "image_width": 640,
@@ -116,6 +116,7 @@ class SocialNavigator:
         # --- Human Trajectory prediction ---
         "human_pred_history_s": 2.0,
         "human_pred_s": 4.0,
+        "human_pred_points": 0,    # if nonzero, overrides human_pred_s/dt directly
         "pred_interval_s": 0.0,    # 0 = every frame
         # --- Safety Gaussian shape ---
         "safety_sigma": _DEF_SIGMA,               # Gaussian width at current position (m)
@@ -185,12 +186,12 @@ class SocialNavigator:
 
         # --- Derive step counts from time-based params ---
         dt = self.params["time_step"]
-        self._horizon_steps = max(1, int(round(self.params["horizon_s"] / dt)))
+        self._horizon_steps = max(1, int(round(self.params["robot_horizon_s"] / dt)))
         self._pred_history_steps = max(1, int(round(self.params["human_pred_history_s"] / dt)))
         self._pred_interval = max(1, int(round(self.params["pred_interval_s"] / dt))) if self.params["pred_interval_s"] > 0 else 1
 
         # --- Trajectory predictor ---
-        pred_steps = max(1, int(round(self.params["human_pred_s"] / dt)))
+        pred_steps = self.params["human_pred_points"] or max(1, int(round(self.params["human_pred_s"] / dt)))
         self._predictor = HumanTrajectoryPredictor(
             history_length=self._pred_history_steps,
             prediction_steps=pred_steps,
@@ -214,7 +215,7 @@ class SocialNavigator:
         self._motion_original = None
         self._motion_modulated = None
         self._lidar_ranges = None
-        self._robot_predicted_path = None  # list of [x, y] in robot frame
+        # self._robot_predicted_path = None  # list of [x, y] in robot frame
         self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
         self._goal_rf = None               # [x_lateral, depth] estimated goal position
         self._current_traj = None            # extrapolated robot path
@@ -1743,7 +1744,7 @@ class SocialNavigator:
         """
         bezier with limited number of steps
         """
-        horizon = self.params["horizon_s"]
+        horizon = self.params["robot_horizon_s"]
         steps = self._horizon_steps
         if self._goal_rf is None:
             return []
@@ -1770,7 +1771,7 @@ class SocialNavigator:
         # P2: pull back from goal along direction from p1
         p2 = p3 + p1p3*(1/3)
 
-        full_traj = self._bezier(p0, p1, p2, p3, steps=steps)
+        full_traj = self._bezier(p0, p1, p2, p3, steps=steps)[:steps]
         return full_traj
 
     @staticmethod
