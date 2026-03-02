@@ -50,6 +50,7 @@ HUMAN_POLICIES = ["orca"]
 TRAJ_PRED_FLAGS = [True, False]
 ROBOT_SPEEDS = [1.0]
 TRAJ_DIRECT_STEP = False   # set True to use direct force method instead of normalized heading
+DISABLE_VX_MOD  = False   # set True to disable vx modulation (sets vx_min=1.0)
 
 # ── Per-run settings ──
 DEFAULT_NUM_EPISODES = 20
@@ -110,6 +111,12 @@ def run_one(params, csv_path, num_episodes, max_steps):
 
         if TRAJ_DIRECT_STEP:
             cmd.append("--traj_direct_step")
+
+        if DISABLE_VX_MOD:
+            cmd += ["--vx_min", "1.0"]
+
+        if params.get("vx_min") is not None:
+            cmd += ["--vx_min", str(params["vx_min"])]
 
         if not params.get("traj_pred", True):
             cmd.append("--disable_human_traj_pred")
@@ -203,26 +210,33 @@ COMPARE_CONDITIONS = [
         "socialnav": True,
         "traj_pred": True,
     },
-    # {
-    #     "label": "vla_snON",
-    #     "robot_policy": "vla",
-    #     "socialnav": True,
-    #     "traj_pred": False,
-    # },
-    # {
-    #     "label": "orca",
-    #     "robot_policy": "orca",
-    #     "socialnav": False,
-    #     "traj_pred": True,
-    # },
-    # {
-    #     "label": "sarl",
-    #     "robot_policy": "sarl",
-    #     "socialnav": False,
-    #     "traj_pred": True,
-    #     "crowdnav_model_path": SARL_MODEL_PATH,
-    #     "crowdnav_policy_config": SARL_POLICY_CONFIG,
-    # },
+    {
+        "label": "vla_snON",
+        "robot_policy": "vla",
+        "socialnav": True,
+        "traj_pred": False,
+    },
+    {
+        "label": "vla_snON_novx",
+        "robot_policy": "vla",
+        "socialnav": True,
+        "traj_pred": True,
+        "vx_min": 1.0,
+    },
+    {
+        "label": "orca",
+        "robot_policy": "orca",
+        "socialnav": False,
+        "traj_pred": True,
+    },
+    {
+        "label": "sarl",
+        "robot_policy": "sarl",
+        "socialnav": False,
+        "traj_pred": True,
+        "crowdnav_model_path": SARL_MODEL_PATH,
+        "crowdnav_policy_config": SARL_POLICY_CONFIG,
+    },
 ]
 
 # Environment axes to sweep across in compare mode
