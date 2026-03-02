@@ -90,7 +90,7 @@ ABLATION_AXES = {
     },
     "vx_min": {
         "flag": "--vx_min",
-        "values": [0.0, -0.5, -1.0],
+        "values": [0.25, 0.0, -0.25],
         "default": 0.0,
     },
     "traj_goal_gain": {
