@@ -375,7 +375,7 @@ class HeadlessRunner(CrowdNavPolicyMixin):
                     "safety_sigma_spread", "safety_h_traj_scale",
                     "shield_thresh_on", "shield_thresh_off",
                     "vx_sfm_gain", "human_pred_s",
-                    "traj_gradient_gain", "traj_goal_gain"):
+                    "traj_gradient_gain", "traj_goal_gain", "traj_step_size"):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
@@ -1138,7 +1138,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                     "safety_sigma_spread", "safety_h_traj_scale",
                     "shield_thresh_on", "shield_thresh_off",
                     "vx_sfm_gain", "human_pred_s",
-                    "traj_gradient_gain", "traj_goal_gain"):
+                    "traj_gradient_gain", "traj_goal_gain", "traj_step_size"):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
@@ -1904,6 +1904,8 @@ if __name__ == "__main__":
                         help='How strongly the safety gradient nudges each trajectory step. Default: 1.0')
     parser.add_argument('--traj_goal_gain', type=float, default=None,
                         help='Attractive force toward goal during gradient walk. Default: 0.3')
+    parser.add_argument('--traj_step_size', type=float, default=None,
+                        help='Step size in meters for gradient walk. Default: 0.2')
 
     # ── Environment overrides ──
     parser.add_argument('--robot_speed', type=float, default=None,
