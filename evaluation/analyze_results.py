@@ -75,16 +75,17 @@ def header_line():
 
 # ── Main ──────────────────────────────────────────────────────────────
 
+METRIC_COLS = {"success_rate", "collision_rate", "avg_min_distance",
+               "avg_danger_count", "avg_near_miss", "avg_steps",
+               "avg_sim_time", "avg_goal_dist", "wall_time", "timestamp",
+               "num_episodes", "mission_instruction", "robot_speed"}
+
+def _varying_param_cols(df):
+    return [c for c in df.columns if c not in METRIC_COLS and df[c].nunique() > 1]
+
 def find_best_combo(df):
     """Rank all tested parameter combinations by a composite score."""
-    # Identify parameter columns (everything that isn't a metric or metadata)
-    metric_cols = {"success_rate", "collision_rate", "avg_min_distance",
-                   "avg_danger_count", "avg_near_miss", "avg_steps",
-                   "avg_sim_time", "avg_goal_dist", "wall_time", "timestamp",
-                   "num_episodes", "mission_instruction", "robot_speed"}
-    param_cols = [c for c in df.columns if c not in metric_cols and c in df.columns]
-    # Only keep param cols that actually vary
-    param_cols = [c for c in param_cols if df[c].nunique() > 1]
+    param_cols = _varying_param_cols(df)
 
     if not param_cols:
         print(f"\n  {YELLOW}No varying parameters found — only one configuration in data.{RESET}")
@@ -253,6 +254,8 @@ def main():
         ("human_pred_s",      "Human Pred S"),
         ("traj_gradient_gain", "Traj Grad Gain"),
         ("traj_goal_gain",    "Traj Goal Gain"),
+        ("traj_step_size",    "Traj Step Size"),
+        ("vx_min",            "VX Min"),
     ]
 
     if "robot_speed" in df.columns:
@@ -288,23 +291,21 @@ def main():
             print()
 
     # ── 3. Worst / best configs ───────────────────────────────────────
+    param_cols = _varying_param_cols(df)
+
+    def row_tag(row):
+        parts = [f"{c}={row[c]}" for c in param_cols if c in row.index]
+        return "  ".join(parts)
+
     section("Top 5 Best Configs (by success rate, then min danger)")
     best = df.nlargest(5, ["success_rate", "avg_min_distance"])
     for _, row in best.iterrows():
-        sn = "ON" if row["socialnav_enabled"] else "OFF"
-        tp = "ON" if row["human_traj_pred"] else "OFF"
-        tag = (f"sn={sn} h={int(row['human_num'])} "
-               f"hspd={row['human_v_pref']} {row['human_policy']} tp={tp}")
-        print(summary_row(tag, pd.DataFrame([row])))
+        print(summary_row(row_tag(row), pd.DataFrame([row])))
 
     section("Top 10 Worst Configs (by success rate, then max danger)")
     worst = df.nsmallest(10, ["success_rate", "avg_min_distance"])
     for _, row in worst.iterrows():
-        sn = "ON" if row["socialnav_enabled"] else "OFF"
-        tp = "ON" if row["human_traj_pred"] else "OFF"
-        tag = (f"sn={sn} h={int(row['human_num'])} "
-               f"hspd={row['human_v_pref']} {row['human_policy']} tp={tp}")
-        print(summary_row(tag, pd.DataFrame([row])))
+        print(summary_row(row_tag(row), pd.DataFrame([row])))
 
     print()
 

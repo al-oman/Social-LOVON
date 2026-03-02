@@ -93,6 +93,11 @@ ABLATION_AXES = {
         "values": [0.0, -0.5, -1.0],
         "default": 0.0,
     },
+    "traj_goal_gain": {
+        "flag": "--traj_goal_gain",
+        "values": [0.1, 0.3, 0.5],
+        "default": 0.3,
+    },
 }
 
 
