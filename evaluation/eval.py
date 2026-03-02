@@ -53,7 +53,7 @@ TRAJ_DIRECT_STEP = False   # set True to use direct force method instead of norm
 DISABLE_VX_MOD  = False   # set True to disable vx modulation (sets vx_min=1.0)
 
 # ── Per-run settings ──
-DEFAULT_NUM_EPISODES = 20
+DEFAULT_NUM_EPISODES = 10
 DEFAULT_MAX_STEPS = 100
 
 
@@ -198,12 +198,12 @@ def build_full_sweep():
 
 # The four conditions to compare
 COMPARE_CONDITIONS = [
-    # {
-    #     "label": "vla_snON",
-    #     "robot_policy": "vla",
-    #     "socialnav": True,
-    #     "traj_pred": True,
-    # },
+    {
+        "label": "vla_snON",
+        "robot_policy": "vla",
+        "socialnav": True,
+        "traj_pred": True,
+    },
     # {
     #     "label": "vla_snON_tpOFF",
     #     "robot_policy": "vla",
@@ -230,24 +230,24 @@ COMPARE_CONDITIONS = [
     #     "traj_pred": True,
     #     "vx_min": 1.0,
     # },
-    # {
-    #     "label": "orca",
-    #     "robot_policy": "orca",
-    #     "socialnav": False,
-    #     "traj_pred": True,
-    # },
-    # {
-    #     "label": "sarl",
-    #     "robot_policy": "sarl",
-    #     "socialnav": False,
-    #     "traj_pred": True,
-    #     "crowdnav_model_path": SARL_MODEL_PATH,
-    #     "crowdnav_policy_config": SARL_POLICY_CONFIG,
-    # },
+    {
+        "label": "orca",
+        "robot_policy": "orca",
+        "socialnav": False,
+        "traj_pred": True,
+    },
+    {
+        "label": "sarl",
+        "robot_policy": "sarl",
+        "socialnav": False,
+        "traj_pred": True,
+        "crowdnav_model_path": SARL_MODEL_PATH,
+        "crowdnav_policy_config": SARL_POLICY_CONFIG,
+    },
 ]
 
 # Environment axes to sweep across in compare mode
-COMPARE_THETAS = [2.356, 1.5708, 0.785]
+COMPARE_THETAS = [1.5708]
 COMPARE_HUMAN_NUMS = [1, 2, 3]
 COMPARE_HUMAN_SPEEDS = [1.0]
 COMPARE_HUMAN_POLICIES = ["orca"]
