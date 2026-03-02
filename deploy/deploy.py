@@ -380,6 +380,8 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
+        if args.traj_direct_step:
+            sn_kwargs["traj_normalize_step"] = False
         self.social_nav = SocialNavigator(
             enabled=args.socialnav_enabled, **sn_kwargs
         )
@@ -1146,6 +1148,8 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             val = getattr(args, key, None)
             if val is not None:
                 sn_kwargs[key] = val
+        if args.traj_direct_step:
+            sn_kwargs["traj_normalize_step"] = False
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
 
@@ -1912,6 +1916,9 @@ if __name__ == "__main__":
                         help='Step size in meters for gradient walk. Default: 0.2')
     parser.add_argument('--vx_min', type=float, default=None,
                         help='Minimum vx multiplier floor; negative allows reversing. Default: 0.0')
+    parser.add_argument('--traj_direct_step', action='store_true', default=False,
+                        help='Use direct force displacement (nxt = cur + grad + goal) instead of '
+                             'normalized heading+grad+goal * step_size')
 
     # ── Environment overrides ──
     parser.add_argument('--robot_speed', type=float, default=None,

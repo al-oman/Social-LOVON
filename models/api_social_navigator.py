@@ -105,6 +105,7 @@ class SocialNavigator:
         "traj_gradient_gain": 0.5,     # how strongly the safety gradient nudges each step
         "traj_goal_gain": 0.3,         # attractive force toward goal during gradient walk
         "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
+        "traj_normalize_step": True,   # True = heading+grad+goal normalized * step_size; False = direct force displacement
         "max_traj_curvature": 1.0,
         # Robot pred
         "robot_horizon_s": 2.0,
@@ -1892,6 +1893,7 @@ class SocialNavigator:
         step_size = self.params.get("traj_step_size", 0.2)
         grad_gain = self.params.get("traj_gradient_gain", 0.5)
         goal_gain = self.params.get("traj_goal_gain", 0.3)
+        normalize_step = self.params.get("traj_normalize_step", True)
         max_steps = self.params.get("traj_max_steps", 100)
         thresh_off = self.params["shield_thresh_off"]
         curvature = self.params.get("path_curvature", 0.5)
@@ -1945,18 +1947,21 @@ class SocialNavigator:
             f_goal = goal_gain * (to_goal / tg_dist) * goal_gain if tg_dist > 1e-9 else 0.0
 
 
-            # nxt = cur + f_grad + f_goal
-            # New direction = forward heading + gradient nudge + goal pull
-            # step_dir = (nxt - cur) / np.linalg.norm(nxt - cur)
-            step_dir = heading + grad_gain * grad + f_goal
-            step_norm = np.linalg.norm(step_dir)
-            if step_norm > 1e-9:
-                step_dir = step_dir / step_norm
+            if normalize_step:
+                step_dir = heading + grad_gain * grad + f_goal
+                step_norm = np.linalg.norm(step_dir)
+                if step_norm > 1e-9:
+                    step_dir = step_dir / step_norm
+                nxt = cur + step_dir * step_size
+            else:
+                nxt = cur + grad_gain * grad + f_goal
+                step_dir = nxt - cur
+                step_norm = np.linalg.norm(step_dir)
+                if step_norm > 1e-9:
+                    step_dir = step_dir / step_norm
 
-            nxt = cur + step_dir * step_size
             points.append(nxt)
-
-            heading = step_dir  # update heading for next step
+            heading = step_dir
 
             # safety check
             safety = self._sample_safety(

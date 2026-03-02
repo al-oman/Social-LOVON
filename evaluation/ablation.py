@@ -40,7 +40,7 @@ ROBOT_SPEED = 0.5
 
 # ── Simulation config axes (cross-product with every hyperparam config) ──
 SIM_CONFIGS = {
-    "robot_theta": [0.7854, 2.3562],
+    "robot_theta": [0.7854],
     "human_num":   [2],
 }
 
