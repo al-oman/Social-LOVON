@@ -1932,18 +1932,22 @@ class SocialNavigator:
                 cur.reshape(1, 2), gx_grid, gy_grid, xlim, ylim, x_res, y_res
             )[0]  # shape (2,)
 
+            f_grad = grad_gain *grad
+
             # Attractive force toward goal (unit vector from cur to goal)
             to_goal = goal - cur
             tg_dist = np.linalg.norm(to_goal)
-            f_goal = (to_goal / tg_dist) * goal_gain if tg_dist > 1e-9 else 0.0
+            f_goal = goal_gain * (to_goal / tg_dist) * goal_gain if tg_dist > 1e-9 else 0.0
 
+
+            nxt = cur + f_grad + f_goal
             # New direction = forward heading + gradient nudge + goal pull
-            step_dir = heading + grad_gain * grad + f_goal
-            step_norm = np.linalg.norm(step_dir)
-            if step_norm > 1e-9:
-                step_dir = step_dir / step_norm
+            # step_dir = heading + grad_gain * grad + f_goal
+            # step_norm = np.linalg.norm(step_dir)
+            # if step_norm > 1e-9:
+            #     step_dir = step_dir / step_norm
 
-            nxt = cur + step_dir * step_size
+            # nxt = cur + step_dir * step_size
             points.append(nxt)
             heading = step_dir  # update heading for next step
 
