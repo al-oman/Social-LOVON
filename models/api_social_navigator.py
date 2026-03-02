@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 from models.humantrajectorypredictor import HumanTrajectoryPredictor
 from models.safety import (
-    robot_safety_score, compute_safety_grid, safety_score_at_point, _safety_scores,
+    robot_safety_score, compute_safety_grid, safety_score_at_point, _safety_scores, safety_score_along_traj,
     SIGMA as _DEF_SIGMA, H as _DEF_H, GAMMA as _DEF_GAMMA,
     SIGMA_SPREAD as _DEF_SIGMA_SPREAD, H_TRAJ_SCALE as _DEF_H_TRAJ_SCALE,
 )
@@ -219,7 +219,10 @@ class SocialNavigator:
         self._goal_rf = None               # [x_lateral, depth] estimated goal position
         self._current_traj = None            # extrapolated robot path
         self._current_traj_score = 0.0     # score of current extrapolated path
+        self._current_traj_min_score = 1.0
         self._best_traj = None             # best trajectory from _get_best_traj
+        self._best_traj_avg = None
+        self._best_traj_min = None
         self._best_control_pts = None      # (p0, p1, p2, p3) from _get_best_traj
         self._best_traj_score = 0.0        # score from _get_best_traj
 
@@ -1012,6 +1015,32 @@ class SocialNavigator:
         logger.debug("safety_score=%.3f", score)
         return score
 
+    def _compute_safety_score_path(self, curve):
+        if not self._tracked_humans:
+            return 1.0, 1.0
+
+        # Human positions in robot frame (robot is at origin)
+        human_positions = [
+            tuple(human.position_rf)
+            for human in self._tracked_humans.values()
+            if human.position_rf is not None
+        ]
+
+        human_predicted_paths = {
+            human.track_id: human.predicted_path
+            for human in self._tracked_humans.values()
+            if human.predicted_path
+        }
+
+        avg_score, min_score = safety_score_along_traj(curve, human_positions,
+                                   human_predicted_paths=human_predicted_paths,
+                                   human_traj_pred=self.params["human_traj_pred"],
+                                   **self._safety_kw)
+
+        logger.debug("avg, min scores=%.3f %.3f", avg_score, min_score)
+        return avg_score, min_score 
+
+
     # ================================================================== #
     #  STAGE 6 -- Shield gate                                              #
     # ================================================================== #
@@ -1321,9 +1350,11 @@ class SocialNavigator:
         # --- Score the robot's current extrapolated path ---
         try:
             traj = self._extrapolate_robot_trajectory(motion)
-            traj_score, lowest_safety = self._trajectory_eval_v2(traj)
+            traj_score, lowest_safety = self._compute_safety_score_path(traj)
+
             self._current_traj = traj
             self._current_traj_score = traj_score
+            self._current_traj_min_score = lowest_safety
         except Exception as e:
             logger.error("_update_trajectory_data traj eval FAILED: %s", e, exc_info=True)
             self._current_traj = None
@@ -1340,7 +1371,6 @@ class SocialNavigator:
                 logger.error("_update_trajectory_data _get_best_traj FAILED: %s", e, exc_info=True)
         else:
             self._best_traj = None
-            self._best_control_pts = None
             self._best_traj_score = self._current_traj_score
 
     def _update_diagnostics(self):
@@ -1352,7 +1382,7 @@ class SocialNavigator:
         self.diag = {
             "num_humans": len(self._tracked_humans),
             "min_distance": min(distances) if distances else None,
-            "safety_score": self.safety_score,
+            "point safety_score": self.safety_score,
             "shield_active": self.shield_active,
             "traj_score": getattr(self, '_current_traj_score', 0.0),
             "best_traj_score": getattr(self, '_best_traj_score', 0.0),
@@ -1521,6 +1551,7 @@ class SocialNavigator:
                      (10, 25), _cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
 
         # ------------------Robot trajectory curves-------------------
+        # ------------------Robot trajectory curves-------------------
         traj_tips = {}  # key: "original" or "corrected" -> (px, py)
         for vec, color, key in [
             (self._motion_original,  (255, 255, 0),  "original")
@@ -1528,7 +1559,7 @@ class SocialNavigator:
         ]:
             if vec is None:
                 continue
-            path = self._extrapolate_robot_trajectory(vec)
+            path = self._current_traj
             prev = (rcx, rcy)
             tip = prev
             for pt in path:
@@ -1549,7 +1580,7 @@ class SocialNavigator:
                 py = int(rcy - pt[1] * scale)
                 if not (0 <= px < sz and 0 <= py < sz):
                     break
-                _cv2.line(bev, prev, (px, py), (0, 255, 255), 2, _cv2.LINE_AA)
+                _cv2.line(bev, prev, (px, py), (0, 0, 0), 2, _cv2.LINE_AA)
                 prev = (px, py)
         else:
             logger.info("self.best_traj is None")
