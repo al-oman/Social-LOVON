@@ -34,11 +34,15 @@ DEFAULT_NUM_EPISODES = 20
 DEFAULT_MAX_STEPS = 100
 
 # ── Fixed environment for ablation ──
-ENV_HUMAN_NUM = 2
 ENV_HUMAN_SPEED = 1.0
 ENV_HUMAN_POLICY = "orca"
-ROBOT_THETA = 0.785
 ROBOT_SPEED = 1.0
+
+# ── Simulation config axes (cross-product with every hyperparam config) ──
+SIM_CONFIGS = {
+    "robot_theta": [0.7854, 1.5708, 2.3562],
+    "human_num":   [1, 2, 3],
+}
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Ablation axes — one parameter varied at a time
@@ -105,12 +109,12 @@ ABLATION_AXES = {
 #  Helpers
 # ═══════════════════════════════════════════════════════════════════════
 
-def make_env_config():
+def make_env_config(human_num):
     """Create a temporary env config with ablation-fixed overrides."""
     with open(BASE_ENV_CONFIG, "r") as f:
         text = f.read()
 
-    text = re.sub(r"^human_num\s*=.*$", f"human_num = {ENV_HUMAN_NUM}",
+    text = re.sub(r"^human_num\s*=.*$", f"human_num = {human_num}",
                   text, flags=re.MULTILINE)
     text = re.sub(r"^v_pref\s*=.*$", f"v_pref = {ENV_HUMAN_SPEED}",
                   text, flags=re.MULTILINE)
@@ -123,9 +127,9 @@ def make_env_config():
     return path
 
 
-def run_one(csv_path, num_episodes, max_steps, extra_flags):
+def run_one(csv_path, num_episodes, max_steps, extra_flags, robot_theta, human_num):
     """Run a single headless evaluation with extra CLI flags."""
-    tmp_config = make_env_config()
+    tmp_config = make_env_config(human_num)
 
     try:
         mission = f"move to the handbag at speed of {ROBOT_SPEED} m/s"
@@ -137,7 +141,7 @@ def run_one(csv_path, num_episodes, max_steps, extra_flags):
             "--max_steps", str(max_steps),
             "--csv_path", csv_path,
             "--mission_instruction", mission,
-            "--robot_theta", str(ROBOT_THETA),
+            "--robot_theta", str(robot_theta),
             "--env_config", tmp_config,
             "--policy_config", POLICY_CONFIG,
             "--robot_policy", "vla",
@@ -157,8 +161,26 @@ def _default_flags():
     return flags
 
 
+def _sim_combos():
+    """All (robot_theta, human_num) combinations from SIM_CONFIGS."""
+    return list(itertools.product(
+        SIM_CONFIGS["robot_theta"],
+        SIM_CONFIGS["human_num"],
+    ))
+
+
+def _expand_sim(hyperparam_sweep):
+    """Cross-product a (tag, extra_flags) sweep with all sim config combos."""
+    result = []
+    for tag, extra_flags in hyperparam_sweep:
+        for theta, nhumans in _sim_combos():
+            sim_tag = f"{tag}__theta{theta}_h{nhumans}"
+            result.append((sim_tag, extra_flags, theta, nhumans))
+    return result
+
+
 def build_ablation_sweep(param_names=None):
-    """Build list of (tag, extra_flags) for each ablation run.
+    """Build list of (tag, extra_flags, theta, human_num) for each ablation run.
 
     Varies one parameter at a time, holding others at defaults.
     """
@@ -167,9 +189,7 @@ def build_ablation_sweep(param_names=None):
         axes = {k: v for k, v in axes.items() if k in param_names}
 
     base = _default_flags()
-    sweep = []
-
-    sweep.append(("baseline", base))
+    hyperparam_sweep = [("baseline", base)]
 
     for param_name, spec in axes.items():
         for val in spec["values"]:
@@ -178,13 +198,13 @@ def build_ablation_sweep(param_names=None):
             else:
                 tag = f"{param_name}_{val}"
             extra = base + [spec["flag"], str(val)]
-            sweep.append((tag, extra))
+            hyperparam_sweep.append((tag, extra))
 
-    return sweep
+    return _expand_sim(hyperparam_sweep)
 
 
 def build_grid_sweep(param_names=None):
-    """Build list of (tag, extra_flags) for every combination of param values."""
+    """Build list of (tag, extra_flags, theta, human_num) for every combination."""
     axes = ABLATION_AXES
     if param_names:
         axes = {k: v for k, v in axes.items() if k in param_names}
@@ -194,7 +214,7 @@ def build_grid_sweep(param_names=None):
     value_lists = [s["values"] for s in specs]
 
     base = _default_flags()
-    sweep = []
+    hyperparam_sweep = []
     for combo in itertools.product(*value_lists):
         parts = []
         extra = []
@@ -202,9 +222,9 @@ def build_grid_sweep(param_names=None):
             parts.append(f"{name}={val}")
             extra.extend([spec["flag"], str(val)])
         tag = "  ".join(parts)
-        sweep.append((tag, base + extra))
+        hyperparam_sweep.append((tag, base + extra))
 
-    return sweep
+    return _expand_sim(hyperparam_sweep)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -246,14 +266,15 @@ def main():
     print(f"  Social-LOVON VLA {mode_label}")
     print(f"  Parameters: {param_label}")
     print(f"  {total} configurations x {args.num_episodes} episodes each")
-    print(f"  Fixed env: {ENV_HUMAN_NUM} humans, speed {ENV_HUMAN_SPEED}, "
-          f"policy {ENV_HUMAN_POLICY}, theta {ROBOT_THETA}")
+    print(f"  Fixed env: speed {ENV_HUMAN_SPEED}, policy {ENV_HUMAN_POLICY}")
+    print(f"  Sim configs: theta {SIM_CONFIGS['robot_theta']}, "
+          f"human_num {SIM_CONFIGS['human_num']}")
     print(f"  Results: {results_dir}")
     print("=" * 60)
     print()
 
     failures = []
-    for i, (tag, extra_flags) in enumerate(sweep):
+    for i, (tag, extra_flags, theta, human_num) in enumerate(sweep):
         pct = 100 * i // total
         print("-" * 56)
         print(f"  [{i+1}/{total}] ({pct}%)  {tag}")
@@ -261,7 +282,7 @@ def main():
             print(f"    {' '.join(extra_flags)}")
         print("-" * 56)
 
-        rc = run_one(csv_path, args.num_episodes, args.max_steps, extra_flags)
+        rc = run_one(csv_path, args.num_episodes, args.max_steps, extra_flags, theta, human_num)
         if rc != 0:
             failures.append(tag)
             print(f"  WARNING: exited with code {rc}")
