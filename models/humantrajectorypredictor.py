@@ -14,17 +14,19 @@ class HumanTrajectoryPredictor:
     Inputs/outputs are in robot-frame metric coordinates [x_lateral, depth].
     """
 
-    def __init__(self, history_length=5, prediction_steps=10, prediction_interval=1):
+    def __init__(self, history_length=5, prediction_steps=10, prediction_interval=1, step_stride=1):
         """
         Args:
             history_length:      Number of past positions to retain per human.
-            prediction_steps:    How many future timesteps to predict.
-            prediction_interval: Only recompute predictions every N calls
-                                 (set to 1 for every frame; original default was 3).
+            prediction_steps:    How many output points to produce.
+            prediction_interval: Only recompute predictions every N calls.
+            step_stride:         Frame-count increment per output point.
+                                 e.g. stride=4 at dt=0.25s → 1 point per second.
         """
         self.history_length = history_length
         self.prediction_steps = prediction_steps
         self.prediction_interval = prediction_interval
+        self.step_stride = step_stride
 
         self.agent_trajectories = defaultdict(
             lambda: deque(maxlen=self.history_length)
@@ -77,7 +79,7 @@ class HumanTrajectoryPredictor:
         last_t = timesteps[-1]
         predicted = []
         for i in range(1, self.prediction_steps + 1):
-            ft = last_t + i
+            ft = last_t + i * self.step_stride
             predicted.append([
                 float(np.polyval(x_poly, ft)),
                 float(np.polyval(y_poly, ft)),

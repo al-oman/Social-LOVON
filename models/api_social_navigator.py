@@ -118,8 +118,9 @@ class SocialNavigator:
         # --- Human Trajectory prediction ---
         "human_pred_history_s": 2.0,
         "human_pred_s": 8.0,
-        "human_pred_points": 0,    # if nonzero, overrides human_pred_s/dt directly
-        "pred_interval_s": 0.0,    # 0 = every frame
+        "human_pred_subsample_s": 1.0,  # seconds between output prediction points
+        "human_pred_points": 0,         # if nonzero, overrides computed point count directly
+        "pred_interval_s": 0.0,         # 0 = every frame
         # --- Safety Gaussian shape ---
         "safety_sigma": _DEF_SIGMA,               # Gaussian width at current position (m)
         "safety_h": _DEF_H,                       # peak danger amplitude (0..1)
@@ -193,11 +194,14 @@ class SocialNavigator:
         self._pred_interval = max(1, int(round(self.params["pred_interval_s"] / dt))) if self.params["pred_interval_s"] > 0 else 1
 
         # --- Trajectory predictor ---
-        pred_steps = self.params["human_pred_points"] or max(1, int(round(self.params["human_pred_s"] / dt)))
+        subsample_s = self.params["human_pred_subsample_s"]
+        stride = max(1, round(subsample_s / dt))
+        pred_steps = self.params["human_pred_points"] or max(1, int(round(self.params["human_pred_s"] / subsample_s)))
         self._predictor = HumanTrajectoryPredictor(
             history_length=self._pred_history_steps,
             prediction_steps=pred_steps,
             prediction_interval=self._pred_interval,
+            step_stride=stride,
         )
         self._frame_count = 0
 
