@@ -56,16 +56,16 @@ ABLATION_AXES = {
     "gamma": {
         "flag": "--safety_gamma",
         "values": [0.90, 0.95, 0.98, 1.0, 1.01],
-        "default": 1.0,
+        "default": 1.01,
     },
     "shield_thresh_on": {
         "flag": "--shield_thresh_on",
-        "values": [0.7],
+        "values": [0.3, 0.5, 0.7],
         "default": 0.7,
     },
     "shield_thresh_off": {
         "flag": "--shield_thresh_off",
-        "values": [0.8],
+        "values": [0.4, 0.6, 0.8, 0.95],
         "default": 0.8,
     },
     "vx_sfm_gain": {
@@ -80,7 +80,7 @@ ABLATION_AXES = {
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
-        "values": [5.0, 6.0, 7.0],
+        "values": [3.0, 5.0, 7.0],
         "default": 6.0,
     },
     "traj_step_size": {
