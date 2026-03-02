@@ -1826,7 +1826,7 @@ if __name__ == "__main__":
     parser.add_argument("--csv_path", type=str, default="eval_results.csv",
                         help="Path to append batch summary rows to")
     parser.add_argument("--mission_instruction", type=str,
-                        default="move to the handbag at speed of 1.0 m/s",
+                        default="move to the handbag at speed of 0.5 m/s",
                         help="Mission instruction for all episodes")
 
     # ── Model paths ──
