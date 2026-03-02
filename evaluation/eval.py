@@ -49,6 +49,7 @@ HUMAN_SPEEDS = [1.0]
 HUMAN_POLICIES = ["orca"]
 TRAJ_PRED_FLAGS = [True, False]
 ROBOT_SPEEDS = [1.0]
+TRAJ_DIRECT_STEP = False   # set True to use direct force method instead of normalized heading
 
 # ── Per-run settings ──
 DEFAULT_NUM_EPISODES = 20
@@ -106,6 +107,9 @@ def run_one(params, csv_path, num_episodes, max_steps):
 
         if params.get("socialnav"):
             cmd.append("--socialnav_enabled")
+
+        if TRAJ_DIRECT_STEP:
+            cmd.append("--traj_direct_step")
 
         if not params.get("traj_pred", True):
             cmd.append("--disable_human_traj_pred")

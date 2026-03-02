@@ -30,13 +30,14 @@ BASE_ENV_CONFIG = os.path.join(PROJECT_ROOT, "configs", "env_lovon.config")
 POLICY_CONFIG = os.path.join(PROJECT_ROOT, "configs", "policy_lovon.config")
 
 # ── Per-run settings ──
-DEFAULT_NUM_EPISODES = 20
+DEFAULT_NUM_EPISODES = 10
 DEFAULT_MAX_STEPS = 100
 
 # ── Fixed environment for ablation ──
 ENV_HUMAN_SPEED = 1.0
 ENV_HUMAN_POLICY = "orca"
 ROBOT_SPEED = 0.5
+TRAJ_DIRECT_STEP = True   # set True to use direct force method instead of normalized heading
 
 # ── Simulation config axes (cross-product with every hyperparam config) ──
 SIM_CONFIGS = {
@@ -84,8 +85,8 @@ ABLATION_AXES = {
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
-        "values": [0.4, 0.5],
-        "default": 2.5,
+        "values": [1, 2, 3, 4],
+        "default": 0.5,
     },
     "traj_step_size": {
         "flag": "--traj_step_size",
@@ -99,8 +100,8 @@ ABLATION_AXES = {
     },
     "traj_goal_gain": {
         "flag": "--traj_goal_gain",
-        "values": [0.2, 0.3, 0.4],
-        "default": 1.5,
+        "values": [1, 2, 3, 4],
+        "default": 0.3,
     },
 }
 
@@ -146,7 +147,7 @@ def run_one(csv_path, num_episodes, max_steps, extra_flags, robot_theta, human_n
             "--policy_config", POLICY_CONFIG,
             "--robot_policy", "vla",
             "--socialnav_enabled",
-        ] + extra_flags
+        ] + (["--traj_direct_step"] if TRAJ_DIRECT_STEP else []) + extra_flags
 
         result = subprocess.run(cmd, cwd=PROJECT_ROOT)
         return result.returncode

@@ -21,7 +21,7 @@ SIGMA_SPREAD     = 0.1   # sigma growth per prediction step (m/step)
 H_TRAJ_SCALE     = 1.0   # per-step H scale along trajectory
 
 # ── Heatmap parameters ─────────────────────────────────────────────────────────
-GRID_RESOLUTION  = 400    # grid cells per axis
+GRID_RESOLUTION  = 100    # grid cells per axis
 COLORMAP         = "viridis"
 N_FILL_LEVELS    = 30     # contourf fill levels
 N_CONTOURS       = 12     # contour line levels
