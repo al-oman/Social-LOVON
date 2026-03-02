@@ -1905,13 +1905,12 @@ class SocialNavigator:
             points.append(nxt)
             heading = step_dir  # update heading for next step
 
-            # Check if we've reached safety
+            # safety check
             safety = self._sample_safety(
                 nxt, self.grid, xlim, ylim, x_res, y_res)
             if safety >= thresh_off:
                 break
 
-            # Stop if we've passed the goal distance
             if np.linalg.norm(nxt) >= goal_dist:
                 break
 
