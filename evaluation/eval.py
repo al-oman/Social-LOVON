@@ -240,11 +240,11 @@ COMPARE_CONDITIONS = [
 ]
 
 # Environment axes to sweep across in compare mode
-COMPARE_THETAS = [0.785, 2.094, 1.5708, 1.047]
-COMPARE_HUMAN_NUMS = [1, 2, 3, 5]
+COMPARE_THETAS = [2.356, 1.5708, 0.785]
+COMPARE_HUMAN_NUMS = [1, 2, 3]
 COMPARE_HUMAN_SPEEDS = [1.0]
 COMPARE_HUMAN_POLICIES = ["orca"]
-COMPARE_ROBOT_SPEEDS = [1.0]
+COMPARE_ROBOT_SPEEDS = [0.5, 1.0]
 
 
 def build_compare_sweep():
