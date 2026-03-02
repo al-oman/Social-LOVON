@@ -58,8 +58,8 @@ CONDITIONS = [
     ("snON",  lambda df: (df["robot_policy"] == "vla") & (df["socialnav_enabled"] == True)),
 ]
 
-METRICS = ["success_rate", "collision_rate", "avg_danger_count", "avg_near_miss", "avg_min_distance", "avg_steps"]
-METRIC_HEADERS = ["succ", "coll", "dngr", "nmiss", "dmin", "steps"]
+METRICS = ["success_rate", "collision_rate", "avg_danger_count", "avg_near_miss", "avg_min_distance", "avg_steps", "avg_policy_ms"]
+METRIC_HEADERS = ["succ", "coll", "dngr", "nmiss", "dmin", "steps", "ms"]
 
 
 # ── Table rendering ──────────────────────────────────────────────────
@@ -67,15 +67,17 @@ METRIC_HEADERS = ["succ", "coll", "dngr", "nmiss", "dmin", "steps"]
 def format_metrics(row):
     """Format a single condition's metrics into a fixed-width string."""
     if row is None:
-        return f"{'—':>6s} {'—':>6s} {'—':>5s} {'—':>5s} {'—':>5s} {'—':>5s}"
+        return f"{'—':>6s} {'—':>6s} {'—':>5s} {'—':>5s} {'—':>5s} {'—':>5s} {'—':>5s}"
     nm = fmt_num(row.get('avg_near_miss', float('nan')))
+    pol = fmt_num(row.get('avg_policy_ms', float('nan')), width=5, decimals=1)
     return (
         f"{color_pct(row['success_rate'])} "
         f"{color_pct_inv(row['collision_rate'])} "
         f"{fmt_num(row['avg_danger_count'])} "
         f"{nm} "
         f"{fmt_num(row['avg_min_distance'], width=5, decimals=2)} "
-        f"{fmt_num(row['avg_steps'], width=5, decimals=0)}"
+        f"{fmt_num(row['avg_steps'], width=5, decimals=0)} "
+        f"{pol}"
     )
 
 
@@ -97,7 +99,8 @@ def print_table(df):
 
     # ── Header ──
     attr_width = 30
-    cond_width = 42  # per condition (raw, before ANSI)
+    cond_width = 48  # per condition (raw, before ANSI)
+    eff_metrics = [m for m in METRICS if m in df.columns]
 
     # Condition group header
     header_top = f"{'':>{attr_width}s}"
@@ -108,7 +111,7 @@ def print_table(df):
 
     # Sub-headers (metric names)
     sub_header = f"{'':>{attr_width}s}"
-    metric_hdr = f"{'succ':>6s} {'coll':>6s} {'dngr':>5s} {'nmiss':>5s} {'dmin':>5s} {'steps':>5s}"
+    metric_hdr = f"{'succ':>6s} {'coll':>6s} {'dngr':>5s} {'nmiss':>5s} {'dmin':>5s} {'steps':>5s} {'ms':>5s}"
     for _ in CONDITIONS:
         sub_header += f"  │ {DIM}{metric_hdr}{RESET}"
     print(sub_header)
@@ -126,7 +129,7 @@ def print_table(df):
         if len(subset) == 0:
             avg_row += f"  │ {format_metrics(None)}"
         else:
-            avg_row += f"  │ {format_metrics(subset[METRICS].mean())}"
+            avg_row += f"  │ {format_metrics(subset[eff_metrics].mean())}"
     print(avg_row)
     print(sep)
 
@@ -154,7 +157,7 @@ def print_table(df):
             if len(subset) == 0:
                 row_str += f"  │ {format_metrics(None)}"
             else:
-                row_str += f"  │ {format_metrics(subset[METRICS].mean())}"
+                row_str += f"  │ {format_metrics(subset[eff_metrics].mean())}"
         print(row_str)
 
     print(sep)
