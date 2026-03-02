@@ -198,31 +198,31 @@ def build_full_sweep():
 
 # The four conditions to compare
 COMPARE_CONDITIONS = [
-    {
-        "label": "vla_snON",
-        "robot_policy": "vla",
-        "socialnav": True,
-        "traj_pred": True,
-    },
     # {
     #     "label": "vla_snON",
     #     "robot_policy": "vla",
     #     "socialnav": True,
-    #     "traj_pred": False,
+    #     "traj_pred": True,
     # },
+    {
+        "label": "vla_snON_tpOFF",
+        "robot_policy": "vla",
+        "socialnav": True,
+        "traj_pred": False,
+    },
     # {
     #     "label": "vla_snOFF",
     #     "robot_policy": "vla",
     #     "socialnav": False,
     #     "traj_pred": True,
     # },
-    # {
-    #     "label": "vla_snON_novx",
-    #     "robot_policy": "vla",
-    #     "socialnav": True,
-    #     "traj_pred": True,
-    #     "vx_min": 1.0,
-    # },
+    {
+        "label": "vla_snON_novx",
+        "robot_policy": "vla",
+        "socialnav": True,
+        "traj_pred": True,
+        "vx_min": 1.0,
+    },
     # {
     #     "label": "orca",
     #     "robot_policy": "orca",

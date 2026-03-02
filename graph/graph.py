@@ -25,9 +25,9 @@ H_TRAJ_SCALE     = 1.0   # per-step H scale along trajectory
 
 # ── Heatmap parameters ─────────────────────────────────────────────────────────
 GRID_RESOLUTION  = 100    # grid cells per axis
-COLORMAP         = "viridis"
+COLORMAP         = "plasma"#"viridis"
 N_FILL_LEVELS    = 30     # contourf fill levels
-N_CONTOURS       = 12     # contour line levels
+N_CONTOURS       = 8     # contour line levels
 CONTOUR_COLOR    = "black"
 CONTOUR_LINEWIDTH = 0.6
 
