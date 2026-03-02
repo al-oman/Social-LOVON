@@ -40,6 +40,7 @@ DOT_EDGECOLOR    = "gray"
 # ── Output ─────────────────────────────────────────────────────────────────────
 SAVE_DAT         = True       # write gnuplot-compatible field.dat
 DAT_PATH         = os.path.join(os.path.dirname(__file__), "field.dat")
+TRAJ_PATH        = os.path.join(os.path.dirname(__file__), "traj.dat")
 
 
 def make_arc(radius, span_deg, n):
@@ -85,6 +86,12 @@ def main():
                     f.write(f"{X[i,j]} {Y[i,j]} {Z[i,j]}\n")
                 f.write("\n")
         print(f"Saved {DAT_PATH}")
+
+        with open(TRAJ_PATH, "w") as f:
+            f.write("x y\n")
+            for x, y in zip(arc_x, arc_y):
+                f.write(f"{x} {y}\n")
+        print(f"Saved {TRAJ_PATH}")
 
     fig, ax = plt.subplots(figsize=FIGSIZE)
     im = ax.imshow(Z, origin="lower", extent=extent,
