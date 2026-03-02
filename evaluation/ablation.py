@@ -80,7 +80,7 @@ ABLATION_AXES = {
     "human_pred_s": {
         "flag": "--human_pred_s",
         "values": [4.0, 6.0, 8.0],
-        "default": 8.0,
+        "default": 5.0,
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
