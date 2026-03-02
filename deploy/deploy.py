@@ -584,6 +584,8 @@ class HeadlessRunner(CrowdNavPolicyMixin):
             "human_pred_s": sn_params.get("human_pred_s", ""),
             "traj_gradient_gain": sn_params.get("traj_gradient_gain", ""),
             "traj_goal_gain": sn_params.get("traj_goal_gain", ""),
+            "traj_step_size": sn_params.get("traj_step_size", ""),
+            "vx_min": sn_params.get("vx_min", ""),
             "success_rate": goals / max(num_episodes, 1),
             "collision_rate": collisions / max(num_episodes, 1),
             "avg_min_distance": avg_min_dist,
