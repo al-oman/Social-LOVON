@@ -1948,6 +1948,50 @@ if __name__ == "__main__":
                 f.write(text)
             args.env_config = tmp_path
 
+    mode = "HEADLESS" if args.headless else "GUI"
+    print("=" * 60)
+    print(f"  deploy.py — {mode}")
+    print("=" * 60)
+    print(f"  mission:          {args.mission_instruction}")
+    print(f"  robot_policy:     {args.robot_policy}")
+    print(f"  robot_theta:      {args.robot_theta}")
+    print(f"  socialnav:        {args.socialnav_enabled}")
+    print(f"  traj_pred:        {not args.disable_human_traj_pred}")
+    if args.headless:
+        print(f"  num_episodes:     {args.num_episodes}")
+        print(f"  max_steps:        {args.max_steps}")
+        print(f"  csv_path:         {args.csv_path}")
+    print("── files ──────────────────────────────────────────────")
+    print(f"  env_config:       {args.env_config}")
+    print(f"  policy_config:    {args.policy_config}")
+    print(f"  yolo:             {args.yolo_model_dir}")
+    print(f"  yolo_pose:        {args.yolo_pose_model_dir}")
+    print(f"  tokenizer:        {args.tokenizer_path}")
+    print(f"  obj_extraction:   {args.object_extraction_model_path}")
+    print(f"  l2mm:             {args.language2motion_model_path}")
+    if args.crowdnav_model_path:
+        print(f"  crowdnav_model:   {args.crowdnav_model_path}")
+    if args.crowdnav_policy_config:
+        print(f"  crowdnav_policy:  {args.crowdnav_policy_config}")
+    print("── sn params ──────────────────────────────────────────")
+    sn_param_args = [
+        ("shield_thresh_on",  args.shield_thresh_on),
+        ("shield_thresh_off", args.shield_thresh_off),
+        ("safety_sigma",      args.safety_sigma),
+        ("safety_gamma",      args.safety_gamma),
+        ("safety_sigma_spread", args.safety_sigma_spread),
+        ("vx_sfm_gain",       args.vx_sfm_gain),
+        ("vx_min",            args.vx_min),
+        ("traj_gradient_gain", args.traj_gradient_gain),
+        ("traj_goal_gain",    args.traj_goal_gain),
+        ("traj_step_size",    args.traj_step_size),
+        ("human_pred_s",      args.human_pred_s),
+    ]
+    for name, val in sn_param_args:
+        flag = f"{val}" if val is not None else "(default)"
+        print(f"  {name:<22s}  {flag}")
+    print("=" * 60)
+
     if args.headless:
         args.crowdnav_sim_mode = True
         _import_headless_deps()

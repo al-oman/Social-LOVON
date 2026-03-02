@@ -22,7 +22,7 @@ H_TRAJ_SCALE     = 1.0   # per-step H scale along trajectory
 
 # ── Heatmap parameters ─────────────────────────────────────────────────────────
 GRID_RESOLUTION  = 50    # grid cells per axis
-COLORMAP         = "RdYlGn"  # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
+COLORMAP         = "virlis"  # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
 HEATMAP_ALPHA    = 0.85   # opacity of the heatmap underlay
 SHOW_CONTOURS    = True   # draw contour lines over the heatmap
 N_CONTOURS       = 6      # number of contour levels
@@ -38,7 +38,7 @@ DOT_COLOR        = "white"
 DOT_EDGECOLOR    = "gray"
 
 # ── Output ─────────────────────────────────────────────────────────────────────
-SAVE_DAT         = True       # write gnuplot-compatible field.dat
+SAVE_DAT         = False       # write gnuplot-compatible field.dat
 DAT_PATH         = os.path.join(os.path.dirname(__file__), "field.dat")
 TRAJ_PATH        = os.path.join(os.path.dirname(__file__), "traj.dat")
 
