@@ -3,15 +3,15 @@ import matplotlib.pyplot as plt
 
 # ── Arc parameters ─────────────────────────────────────────────────────────────
 ARC_RADIUS       = 1.0       # radius of the circular arc (metres)
-ARC_SPAN_DEG     = 120.0     # total angular span of the arc (degrees)
-N_POINTS         = 40        # number of dots along the arc
+ARC_SPAN_DEG     = 90.0     # total angular span of the arc (degrees)
+N_POINTS         = 10        # number of dots along the arc
 DOT_SIZE         = 30        # scatter dot size
 
 # ── Gaussian parameters ────────────────────────────────────────────────────────
 SIGMA_ALONG      = 0.3       # sigma parallel to curve (same for all three)
 SIGMA_PERP_FIRST = 0.3       # sigma perpendicular at first point
-SIGMA_PERP_MID   = 0.6       # sigma perpendicular at middle point
-SIGMA_PERP_LAST  = 1.2       # sigma perpendicular at last point
+SIGMA_PERP_MID   = 0.4       # sigma perpendicular at middle point
+SIGMA_PERP_LAST  = 0.5       # sigma perpendicular at last point
 H_FIRST          = 1.0       # peak amplitude at first point
 H_MID            = 1.0       # peak amplitude at middle point
 H_LAST           = 1.0       # peak amplitude at last point
@@ -20,6 +20,11 @@ H_LAST           = 1.0       # peak amplitude at last point
 GRID_RESOLUTION  = 100       # grid cells per axis
 COLORMAP         = "Blues"     # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
 HEATMAP_ALPHA    = 0.85      # opacity of the heatmap underlay
+SHOW_CONTOURS    = True      # draw contour lines over the heatmap
+N_CONTOURS       = 6        # number of contour levels
+CONTOUR_COLOR    = "black"   # contour line colour
+CONTOUR_ALPHA    = 0.5       # contour line opacity
+CONTOUR_LINEWIDTH = 0.8      # contour line width
 
 # ── Display ────────────────────────────────────────────────────────────────────
 FIGSIZE          = (7, 7)
@@ -74,15 +79,21 @@ def main():
     gy = np.linspace(ymin, ymax, GRID_RESOLUTION)
     X, Y = np.meshgrid(gx, gy)
 
-    Z = np.zeros_like(X)
+    Z = np.ones_like(X)
     for idx, sigma_perp, h in key_points:
         tang = tangent_at(angles, idx)
-        Z += gaussian_2d(X, Y, arc_x[idx], arc_y[idx],
-                         tang, SIGMA_ALONG, sigma_perp, h)
+        g = gaussian_2d(X, Y, arc_x[idx], arc_y[idx],
+                        tang, SIGMA_ALONG, sigma_perp, h)
+        np.minimum(Z, 1.0 - g, out=Z)
 
     fig, ax = plt.subplots(figsize=FIGSIZE)
     im = ax.imshow(Z, origin="lower", extent=[xmin, xmax, ymin, ymax],
                    cmap=COLORMAP, alpha=HEATMAP_ALPHA, aspect="equal")
+
+    if SHOW_CONTOURS:
+        ax.contour(X, Y, Z, levels=N_CONTOURS,
+                   colors=CONTOUR_COLOR, alpha=CONTOUR_ALPHA,
+                   linewidths=CONTOUR_LINEWIDTH)
 
     if SHOW_COLORBAR:
         fig.colorbar(im, ax=ax, label="Gaussian intensity")

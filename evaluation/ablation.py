@@ -70,18 +70,18 @@ ABLATION_AXES = {
     },
     "vx_sfm_gain": {
         "flag": "--vx_sfm_gain",
-        "values": [5.0, 6.0],
+        "values": [3.0, 5.0, 7.0],
         "default": 3.0,
     },
     "human_pred_s": {
         "flag": "--human_pred_s",
-        "values": [1.0, 2.0],
+        "values": [4.0, 6.0, 8.0],
         "default": 6.0,
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
         "values": [5.0, 6.0, 7.0],
-        "default": 4.0,
+        "default": 6.0,
     },
     "traj_step_size": {
         "flag": "--traj_step_size",
@@ -96,7 +96,7 @@ ABLATION_AXES = {
     "traj_goal_gain": {
         "flag": "--traj_goal_gain",
         "values": [0.5, 0.7, 0.9],
-        "default": 0.3,
+        "default": 0.9,
     },
 }
 
