@@ -101,7 +101,7 @@ class SocialNavigator:
         "vx_sfm_gain": 5.0,
         "vy_sfm_gain": 1.0,
         "traj_step_size": 0.2,         # step size in meters for gradient walk
-        "traj_gradient_gain": 1.0,     # how strongly the safety gradient nudges each step
+        "traj_gradient_gain": 0.5,     # how strongly the safety gradient nudges each step
         "traj_goal_gain": 0.3,         # attractive force toward goal during gradient walk
         "traj_max_steps": 100,         # max gradient-walk steps before switching to bezier
         "max_traj_curvature": 1.0,
