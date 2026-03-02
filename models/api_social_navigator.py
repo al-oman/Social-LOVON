@@ -118,7 +118,7 @@ class SocialNavigator:
         # --- Human Trajectory prediction ---
         "human_pred_history_s": 2.0,
         "human_pred_s": 8.0,
-        "human_pred_points": 20,    # if nonzero, overrides human_pred_s/dt directly
+        "human_pred_points": 0,    # if nonzero, overrides human_pred_s/dt directly
         "pred_interval_s": 0.0,    # 0 = every frame
         # --- Safety Gaussian shape ---
         "safety_sigma": _DEF_SIGMA,               # Gaussian width at current position (m)

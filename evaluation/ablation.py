@@ -80,12 +80,12 @@ ABLATION_AXES = {
     "human_pred_s": {
         "flag": "--human_pred_s",
         "values": [4.0, 6.0, 8.0],
-        "default": 6.0,
+        "default": 8.0,
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
         "values": [0.4, 0.5],
-        "default": 1.0,
+        "default": 0.5,
     },
     "traj_step_size": {
         "flag": "--traj_step_size",
@@ -99,8 +99,8 @@ ABLATION_AXES = {
     },
     "traj_goal_gain": {
         "flag": "--traj_goal_gain",
-        "values": [1.0, 1.5, 2.0],
-        "default": 1.0,
+        "values": [0.2, 0.3, 0.4],
+        "default": 0.3,
     },
 }
 
