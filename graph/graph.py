@@ -11,7 +11,10 @@ ARC_RADIUS       = 3.0    # radius of the circular arc (metres)
 ARC_SPAN_DEG     = 60.0   # total angular span of the arc (degrees)
 N_POINTS         = 10     # number of waypoints along the arc
 DOT_SIZE         = 30     # scatter dot size
-PAD              = 3    # padding around arc extents (metres)
+PAD_LEFT         = 3    # padding around arc extents (metres)
+PAD_RIGHT        = 3
+PAD_BOTTOM       = 3
+PAD_TOP          = 3
 
 # ── Safety field parameters (passed directly to safety.py) ─────────────────────
 SIGMA            = 0.75   # Gaussian width at current position (m)
@@ -30,7 +33,8 @@ CONTOUR_LINEWIDTH = 0.6
 
 # ── Display ────────────────────────────────────────────────────────────────────
 FIGSIZE          = (5, 4)
-DPI              = 300
+DPI              = 100   # screen display DPI; PDF saves are vector so this doesn't affect print quality
+SAVE_DPI         = 300   # used only for raster saves
 SHOW_COLORBAR    = True
 SHOW_DOTS        = True
 DOT_COLOR        = "white"
@@ -58,8 +62,8 @@ def main():
     human_positions = [[arc_x[0], arc_y[0]]]
     human_predicted_paths = {0: [[arc_x[i], arc_y[i]] for i in range(1, N_POINTS)]}
 
-    xmin, xmax = arc_x.min() - PAD, arc_x.max() + PAD
-    ymin, ymax = arc_y.min() - PAD, arc_y.max() + PAD
+    xmin, xmax = arc_x.min() - PAD_LEFT, arc_x.max() + PAD_RIGHT
+    ymin, ymax = arc_y.min() - PAD_BOTTOM, arc_y.max() + PAD_TOP
 
     Z, extent = compute_safety_grid(
         human_positions=human_positions,
@@ -118,7 +122,7 @@ def main():
     plt.tight_layout()
 
     if SAVE_PDF:
-        plt.savefig(PDF_PATH, bbox_inches="tight")
+        plt.savefig(PDF_PATH, bbox_inches="tight", dpi=SAVE_DPI)
         print(f"Saved {PDF_PATH}")
 
     plt.show()
