@@ -80,7 +80,8 @@ def header_line():
 METRIC_COLS = {"success_rate", "collision_rate", "avg_min_distance",
                "avg_danger_count", "avg_near_miss", "avg_steps",
                "avg_sim_time", "avg_goal_dist", "wall_time", "timestamp",
-               "num_episodes", "mission_instruction", "robot_speed"}
+               "num_episodes", "mission_instruction", "robot_speed",
+               "human_num"}
 
 def _varying_param_cols(df):
     return [c for c in df.columns if c not in METRIC_COLS and df[c].nunique() > 1]

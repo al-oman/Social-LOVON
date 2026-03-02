@@ -8,15 +8,15 @@ from models.safety import compute_safety_grid
 
 # ── Arc (fake human trajectory) ────────────────────────────────────────────────
 ARC_RADIUS       = 3.0    # radius of the circular arc (metres)
-ARC_SPAN_DEG     = 90.0   # total angular span of the arc (degrees)
+ARC_SPAN_DEG     = 60.0   # total angular span of the arc (degrees)
 N_POINTS         = 10     # number of waypoints along the arc
 DOT_SIZE         = 30     # scatter dot size
-PAD              = 1.5    # padding around arc extents (metres)
+PAD              = 3    # padding around arc extents (metres)
 
 # ── Safety field parameters (passed directly to safety.py) ─────────────────────
 SIGMA            = 0.75   # Gaussian width at current position (m)
 H                = 1.0    # peak danger amplitude (0..1)
-GAMMA            = 1.01    # per-step H multiplier along trajectory
+GAMMA            = 1.05    # per-step H multiplier along trajectory
 SIGMA_SPREAD     = 0.1   # sigma growth per prediction step (m/step)
 H_TRAJ_SCALE     = 1.0   # per-step H scale along trajectory
 
@@ -36,6 +36,10 @@ SHOW_COLORBAR    = True
 SHOW_DOTS        = True
 DOT_COLOR        = "white"
 DOT_EDGECOLOR    = "gray"
+
+# ── Output ─────────────────────────────────────────────────────────────────────
+SAVE_DAT         = True       # write gnuplot-compatible field.dat
+DAT_PATH         = os.path.join(os.path.dirname(__file__), "field.dat")
 
 
 def make_arc(radius, span_deg, n):
@@ -71,6 +75,16 @@ def main():
     gx = np.linspace(xmin, xmax, GRID_RESOLUTION)
     gy = np.linspace(ymin, ymax, GRID_RESOLUTION)
     X, Y = np.meshgrid(gx, gy)
+
+    if SAVE_DAT:
+        N = GRID_RESOLUTION
+        with open(DAT_PATH, "w") as f:
+            f.write("x y z\n")
+            for i in range(N):
+                for j in range(N):
+                    f.write(f"{X[i,j]} {Y[i,j]} {Z[i,j]}\n")
+                f.write("\n")
+        print(f"Saved {DAT_PATH}")
 
     fig, ax = plt.subplots(figsize=FIGSIZE)
     im = ax.imshow(Z, origin="lower", extent=extent,
