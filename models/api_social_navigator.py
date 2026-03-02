@@ -1949,6 +1949,7 @@ class SocialNavigator:
 
             # nxt = cur + step_dir * step_size
             points.append(nxt)
+            step_dir = (nxt - cur) / np.linalg.norm(nxt - cur)
             heading = step_dir  # update heading for next step
 
             # safety check
