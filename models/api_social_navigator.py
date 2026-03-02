@@ -1020,7 +1020,7 @@ class SocialNavigator:
     def _compute_safety_score_path(self, curve):
         if not self._tracked_humans:
             return 1.0, 1.0
-        print(f"[L1020] {time.perf_counter():.4f}")
+        _t0 = time.perf_counter()
 
         # Human positions in robot frame (robot is at origin)
         human_positions = [
@@ -1041,7 +1041,7 @@ class SocialNavigator:
                                    **self._safety_kw)
 
         logger.debug("avg, min scores=%.3f %.3f", avg_score, min_score)
-        print(f"[L1043] {time.perf_counter():.4f}")
+        print(f"[compute_safety_score_path] {(time.perf_counter()-_t0)*1000:.2f}ms")
         return avg_score, min_score 
 
 
@@ -1885,7 +1885,7 @@ class SocialNavigator:
         goal_dist = np.linalg.norm(goal)
         if goal_dist < 0.05:
             return [[0.0, 0.0], goal.tolist()]
-        print(f"[L1887] {time.perf_counter():.4f}")
+        _t0 = time.perf_counter()
 
         # --- Parameters ------------------------------------------- #
         step_size = self.params.get("traj_step_size", 0.2)
@@ -2004,7 +2004,7 @@ class SocialNavigator:
             clipped.append(pt)
             if dist_so_far >= max_dist:
                 break
-        print(f"[L2006] {time.perf_counter():.4f}")
+        print(f"[construct_trajectory] {(time.perf_counter()-_t0)*1000:.2f}ms")
         return clipped
 
 
