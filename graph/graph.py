@@ -22,7 +22,7 @@ H_TRAJ_SCALE     = 1.0   # per-step H scale along trajectory
 
 # ── Heatmap parameters ─────────────────────────────────────────────────────────
 GRID_RESOLUTION  = 250    # grid cells per axis
-COLORMAP         = "Blues"  # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
+COLORMAP         = "RdYlGn"  # try "hot", "plasma", "YlOrRd", "RdYlGn", "Blues"
 HEATMAP_ALPHA    = 0.85   # opacity of the heatmap underlay
 SHOW_CONTOURS    = True   # draw contour lines over the heatmap
 N_CONTOURS       = 6      # number of contour levels

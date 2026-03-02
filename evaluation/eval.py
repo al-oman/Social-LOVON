@@ -51,7 +51,7 @@ TRAJ_PRED_FLAGS = [True, False]
 ROBOT_SPEEDS = [1.0]
 
 # ── Per-run settings ──
-DEFAULT_NUM_EPISODES = 10
+DEFAULT_NUM_EPISODES = 20
 DEFAULT_MAX_STEPS = 100
 
 
@@ -199,20 +199,20 @@ COMPARE_CONDITIONS = [
         "socialnav": True,
         "traj_pred": True,
     },
-    # {
-    #     "label": "orca",
-    #     "robot_policy": "orca",
-    #     "socialnav": False,
-    #     "traj_pred": True,
-    # },
-    # {
-    #     "label": "sarl",
-    #     "robot_policy": "sarl",
-    #     "socialnav": False,
-    #     "traj_pred": True,
-    #     "crowdnav_model_path": SARL_MODEL_PATH,
-    #     "crowdnav_policy_config": SARL_POLICY_CONFIG,
-    # },
+    {
+        "label": "orca",
+        "robot_policy": "orca",
+        "socialnav": False,
+        "traj_pred": True,
+    },
+    {
+        "label": "sarl",
+        "robot_policy": "sarl",
+        "socialnav": False,
+        "traj_pred": True,
+        "crowdnav_model_path": SARL_MODEL_PATH,
+        "crowdnav_policy_config": SARL_POLICY_CONFIG,
+    },
 ]
 
 # Environment axes to sweep across in compare mode
