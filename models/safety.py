@@ -31,8 +31,8 @@ import numpy as np
 # ------------------------------------------------------------------
 SIGMA = 0.75          # Gaussian width at current position (meters)
 H = 1.0              # peak danger at distance=0
-GAMMA = 1.00         # trajectory H multiplier per step
-SIGMA_SPREAD = 0.05   # sigma growth per prediction step (meters/step)
+GAMMA = 1.01         # trajectory H multiplier per step
+SIGMA_SPREAD = 0.1   # sigma growth per prediction step (meters/step)
 H_TRAJ_SCALE = 1.00        # per-step H multiplier along trajectory (<1 shrinks, >1 grows)
 
 
