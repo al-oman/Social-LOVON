@@ -204,39 +204,39 @@ COMPARE_CONDITIONS = [
         "socialnav": True,
         "traj_pred": True,
     },
-    {
-        "label": "vla_snON",
-        "robot_policy": "vla",
-        "socialnav": True,
-        "traj_pred": False,
-    },
-    {
-        "label": "vla_snOFF",
-        "robot_policy": "vla",
-        "socialnav": False,
-        "traj_pred": True,
-    },
-    {
-        "label": "vla_snON_novx",
-        "robot_policy": "vla",
-        "socialnav": True,
-        "traj_pred": True,
-        "vx_min": 1.0,
-    },
-    {
-        "label": "orca",
-        "robot_policy": "orca",
-        "socialnav": False,
-        "traj_pred": True,
-    },
-    {
-        "label": "sarl",
-        "robot_policy": "sarl",
-        "socialnav": False,
-        "traj_pred": True,
-        "crowdnav_model_path": SARL_MODEL_PATH,
-        "crowdnav_policy_config": SARL_POLICY_CONFIG,
-    },
+    # {
+    #     "label": "vla_snON",
+    #     "robot_policy": "vla",
+    #     "socialnav": True,
+    #     "traj_pred": False,
+    # },
+    # {
+    #     "label": "vla_snOFF",
+    #     "robot_policy": "vla",
+    #     "socialnav": False,
+    #     "traj_pred": True,
+    # },
+    # {
+    #     "label": "vla_snON_novx",
+    #     "robot_policy": "vla",
+    #     "socialnav": True,
+    #     "traj_pred": True,
+    #     "vx_min": 1.0,
+    # },
+    # {
+    #     "label": "orca",
+    #     "robot_policy": "orca",
+    #     "socialnav": False,
+    #     "traj_pred": True,
+    # },
+    # {
+    #     "label": "sarl",
+    #     "robot_policy": "sarl",
+    #     "socialnav": False,
+    #     "traj_pred": True,
+    #     "crowdnav_model_path": SARL_MODEL_PATH,
+    #     "crowdnav_policy_config": SARL_POLICY_CONFIG,
+    # },
 ]
 
 # Environment axes to sweep across in compare mode
