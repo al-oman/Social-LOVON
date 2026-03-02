@@ -85,7 +85,7 @@ ABLATION_AXES = {
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
         "values": [0.4, 0.5],
-        "default": 0.5,
+        "default": 2.5,
     },
     "traj_step_size": {
         "flag": "--traj_step_size",
@@ -100,7 +100,7 @@ ABLATION_AXES = {
     "traj_goal_gain": {
         "flag": "--traj_goal_gain",
         "values": [0.2, 0.3, 0.4],
-        "default": 0.3,
+        "default": 1.5,
     },
 }
 
