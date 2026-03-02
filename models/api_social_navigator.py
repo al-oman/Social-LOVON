@@ -1980,8 +1980,22 @@ class SocialNavigator:
         # for i in range(60):
         #     theta = i * 0.05
         #     result.append([-R * (1 - math.cos(theta)), R * math.sin(theta)])
-        steps = self._horizon_steps
-        return result[:steps]
+
+        # Clip by reachable distance (same logic as _extrapolate_robot_trajectory)
+        v_forward = abs(self._motion_original[0]) if self._motion_original else 0.0
+        horizon = self.params["robot_horizon_s"]
+        max_dist = v_forward * horizon
+        if max_dist < 0.01:
+            return []
+        clipped = [result[0]]
+        dist_so_far = 0.0
+        for pt in result[1:]:
+            seg = math.hypot(pt[0] - clipped[-1][0], pt[1] - clipped[-1][1])
+            dist_so_far += seg
+            clipped.append(pt)
+            if dist_so_far >= max_dist:
+                break
+        return clipped
 
 
     def _bezier(self, p0, p1, p2, p3, steps=50):
