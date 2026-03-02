@@ -1377,7 +1377,7 @@ class SocialNavigator:
             self._best_traj = None
             self._best_traj_score = self._current_traj_score
 
-        print(f"_update_trajectory_data total time: {(time.perf_counter() - t0)*1000:.2f}ms")
+        # print(f"_update_trajectory_data total time: {(time.perf_counter() - t0)*1000:.2f}ms")
     def _update_diagnostics(self):
         """Read-only: copy previously stored values into self.diag."""
         distances = [
@@ -2005,7 +2005,7 @@ class SocialNavigator:
             clipped.append(pt)
             if dist_so_far >= max_dist:
                 break
-        print(f"[construct_trajectory] {(time.perf_counter()-_t0)*1000:.2f}ms")
+        # print(f"[construct_trajectory] {(time.perf_counter()-_t0)*1000:.2f}ms")
         return clipped
 
 
