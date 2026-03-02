@@ -99,6 +99,7 @@ class SocialNavigator:
         # "bezier_omega_gain": 1.0,      # safety-knob for curvature-based omega (1.0 = exact differential geometry)
         "max_omega_mag": 1.0,
         "vx_sfm_gain": 5.0,
+        "vx_min": 0.0,
         "vy_sfm_gain": 1.0,
         "traj_step_size": 0.2,         # step size in meters for gradient walk
         "traj_gradient_gain": 0.5,     # how strongly the safety gradient nudges each step
@@ -1178,7 +1179,7 @@ class SocialNavigator:
 
         # If gradient opposes motion (negative), reduce speed proportionally
         if grad_parallel < 0:
-            vx = vx * max(0.0, 1.0 + k * grad_parallel)
+            vx = vx * max(self.params["vx_min"], 1.0 + k * grad_parallel)
 
         return vx
     

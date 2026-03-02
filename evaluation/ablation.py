@@ -80,13 +80,18 @@ ABLATION_AXES = {
     },
     "traj_gradient_gain": {
         "flag": "--traj_gradient_gain",
-        "values": [2.0, 2.5, 3.0, 3.5, 4.0],
+        "values": [4.0, 4.5, 5.0, 6.0],
         "default": 1.0,
     },
     "traj_step_size": {
         "flag": "--traj_step_size",
         "values": [0.1, 0.2, 0.4],
         "default": 0.2,
+    },
+    "vx_min": {
+        "flag": "--vx_min",
+        "values": [0.0, -0.5, -1.0],
+        "default": 0.0,
     },
 }
 
