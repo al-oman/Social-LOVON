@@ -157,7 +157,8 @@ class SocialNavigator:
         # --- Ghost humans (out-of-FOV persistence) ---
         "ghost_max_frames": 400,       # max frames a ghost persists (~30s at 4 Hz)
         # --- Debug / visualisation ---
-        "show_bezier_pts": False      # draw Bezier control points on BEV
+        "show_bezier_pts": False,     # draw Bezier control points on BEV
+        "human_traj_pred": True,      # use predicted human trajectories in safety scoring
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -224,6 +225,7 @@ class SocialNavigator:
         # self._robot_predicted_path = None  # list of [x, y] in robot frame
         self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
         self._goal_rf = None               # [x_lateral, depth] estimated goal position
+        self._goal_fresh = False           # True when update_goal() set a fresh detection this frame
         self._current_traj = None            # extrapolated robot path
         self._current_traj_score = 0.0     # score of current extrapolated path
         self._current_traj_min_score = 1.0
@@ -855,6 +857,16 @@ class SocialNavigator:
                    -x_lat * sin_dt + depth * cos_dt,
                 ]
 
+        # Compensate goal only when no fresh detection this frame
+        if self._goal_rf is not None and not self._goal_fresh:
+            x_lat, depth = self._goal_rf
+            x_lat += v_lat * dt
+            depth -= v_fwd * dt
+            self._goal_rf = [
+                x_lat * cos_dt + depth * sin_dt,
+               -x_lat * sin_dt + depth * cos_dt,
+            ]
+
     def _predict_trajectories(self):
         # type: () -> None
         """
@@ -1344,13 +1356,19 @@ class SocialNavigator:
     #  STAGE 8 -- Diagnostics                                             #
     # ================================================================== #
 
-    def update_goal(self, object_xyn, bbox_height_px):
+    def update_goal(self, object_xyn, bbox_height_px, goal_depth=None):
         """Estimate goal position in robot frame from camera detection."""
-        if bbox_height_px is None or bbox_height_px < 10:
-            return  # keep last valid goal
-        depth = self.params["mono_k"] / bbox_height_px
+        if goal_depth is not None:
+            depth = goal_depth
+        elif bbox_height_px is not None and bbox_height_px >= 10:
+            depth = self.params["mono_k"] / bbox_height_px
+        else:
+            self._goal_fresh = False
+            return  # keep last valid goal — ego-motion will compensate
         u_px = object_xyn[0] * self.params["image_width"]
         self._goal_rf = [depth * (u_px - self._cx) / self._fx, depth]
+        self._goal_fresh = True  # skip ego-motion compensation this frame
+        # print(self._goal_rf)
 
     def _update_trajectory_data(self):
         """Compute current-path score and best trajectory. Called once per step()."""

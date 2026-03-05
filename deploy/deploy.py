@@ -815,8 +815,18 @@ class YoloProcessingThread(threading.Thread):
             try:
                 image = self.image_queue.get(timeout=1)
                 with self.controller.yolo_lock:
-                    results = self.controller.yolo_model(image)
+                    results = self.controller.yolo_model(image, verbose=False)
                     self.controller._yolo_image_post_process(results, image)
+
+                # Override goal detection with ArUco if enabled
+                if self.controller.aruco_detector is not None:
+                    aruco_result = self.controller.aruco_detector.detect(image)
+                    self.controller.state["predicted_object"] = aruco_result["predicted_object"]
+                    self.controller.state["confidence"] = aruco_result["confidence"]
+                    self.controller.state["object_xyn"] = aruco_result["object_xyn"]
+                    self.controller.state["object_whn"] = aruco_result["object_whn"]
+                    self.controller.state["bounding_box"] = aruco_result["bounding_box"]
+                    self.controller.state["goal_depth"] = aruco_result["goal_depth"]
 
                 self.result_queue.put(self.controller.state.copy())
 
@@ -857,7 +867,7 @@ class YoloPoseProcessingThread(threading.Thread):
             try:
                 image = self.image_queue.get(timeout=1)
                 with self.controller.yolo_pose_lock:
-                    results = self.controller.yolo_pose_model(image)
+                    results = self.controller.yolo_pose_model(image, verbose=False)
                     self.controller._yolo_pose_post_process(results, image)
 
                 self.result_queue.put(self.controller.pose_state.copy())
@@ -909,6 +919,7 @@ class MotionControlThread(threading.Thread):
                     with self.controller.motion_lock:
                         self.controller._update_motion_control(state)
                         self.controller._control_robot()
+                    # print(state)
 
                 self.freq_count += 1
                 if time.time() - self.freq_start >= 1:
@@ -1052,6 +1063,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         self.simulation_mode = args.simulation_mode
         self.socialnav_enabled = args.socialnav_enabled
         self.button_update_inst = False
+        self.manual_stop = False
         self.network_device = args.network_device
         self.robot_theta = args.robot_theta
         self.human_traj_pred = not args.disable_human_traj_pred
@@ -1137,6 +1149,11 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         else:
             self.lidar_getter_thread = None
 
+        # LiDAR proximity e-stop constants
+        self.LIDAR_ESTOP_DISTANCE = 0.35  # metres
+        self.LIDAR_ESTOP_Z_MIN = -0.2
+        self.LIDAR_ESTOP_Z_MAX = 0.8
+
         # Social navigation
         sn_width = self.crowdnav_provider.image_width if self.crowdnav_sim_mode else args.image_width
         sn_kwargs = {"image_width": sn_width,
@@ -1165,6 +1182,25 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             sn_kwargs["traj_normalize_step"] = False
         self.social_nav = SocialNavigator(enabled=self.socialnav_enabled,
                                           **sn_kwargs)
+
+        # ArUco goal detector (physical deployment)
+        self.goal_mode = getattr(args, 'goal_mode', 'yolo')
+        self.aruco_detector = None
+        if self.goal_mode == 'aruco':
+            from aruco_goal_detector import ArucoGoalDetector
+            aruco_ids = tuple(int(x) for x in getattr(args, 'aruco_ids', '0,1').split(','))
+            # Build camera matrix from social_nav intrinsics
+            camera_matrix = np.array([
+                [self.social_nav._fx, 0, self.social_nav._cx],
+                [0, self.social_nav._fy, self.social_nav._cy],
+                [0, 0, 1],
+            ], dtype=np.float64)
+            self.aruco_detector = ArucoGoalDetector(
+                marker_ids=aruco_ids,
+                marker_size_m=getattr(args, 'aruco_marker_size', 0.15),
+                camera_matrix=camera_matrix,
+            )
+            print(f"[ArUco] Goal detection via ArUco markers {aruco_ids}")
 
         # Initialize UI
         self.root = Tk()
@@ -1215,8 +1251,15 @@ class VisualLanguageController(CrowdNavPolicyMixin):
 
         control_frame = Frame(self.instruction_frame)
         control_frame.pack(pady=10, padx=10, anchor='n')
+        self.stop_button = Button(control_frame, text="Stop",
+               command=self._toggle_manual_stop,
+               font=self.font_style, width=15, bg="red", fg="white")
+        self.stop_button.pack(side='left', padx=5)
         Button(control_frame, text="Damp",
-               command=lambda: print("Damp command") if self.simulation_mode else self.sport_client.Damp(),
+               command=self._damp_robot,
+               font=self.font_style, width=15).pack(side='left', padx=5)
+        Button(control_frame, text="Recovery Stand",
+               command=lambda: print("RecoveryStand command") if self.simulation_mode else self.sport_client.RecoveryStand(),
                font=self.font_style, width=15).pack(side='left', padx=5)
 
         if self.crowdnav_sim_mode:
@@ -1396,11 +1439,12 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         print(f"Paths saved to {filepath}")
 
     def _init_channel_factory(self):
-        """Initialize Unitree Channel Factory"""
-        if len(sys.argv) > 1:
-            ChannelFactoryInitialize(0, self.network_device)
-        else:
-            ChannelFactoryInitialize(0)
+        # """Initialize Unitree Channel Factory"""
+        # if len(sys.argv) > 1:
+        #     ChannelFactoryInitialize(0, self.network_device)
+        # else:
+        #     ChannelFactoryInitialize(0)
+        ChannelFactoryInitialize(0, self.network_device)
 
     def _init_camera(self):
         """Initialize Robot Camera Client Based on Robot Type"""
@@ -1608,7 +1652,8 @@ class VisualLanguageController(CrowdNavPolicyMixin):
 
         bbox = self.state.get("bounding_box")
         bbox_h = (bbox[3] - bbox[1]) if bbox else None
-        self.social_nav.update_goal(self.state["object_xyn"], bbox_h)
+        self.social_nav.update_goal(self.state["object_xyn"], bbox_h,
+                                    goal_depth=self.state.get("goal_depth"))
 
         self.motion_vector = self.social_nav.step(
             motion_vector=self.motion_vector,
@@ -1617,19 +1662,67 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             lidar_ranges=lidar_cloud,
         )
 
+    def _lidar_too_close(self) -> bool:
+        """Return True if any LiDAR point is dangerously close in front of the robot."""
+        if self.lidar_getter_thread is None:
+            return False
+        cloud = self.lidar_getter_thread.get_cloud()
+        if cloud is None or len(next(iter(cloud.values()), [])) == 0:
+            return False
+        x, y, z = cloud['x'], cloud['y'], cloud['z']
+        mask = (
+            np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            & (x > 0)
+            & (z > self.LIDAR_ESTOP_Z_MIN)
+            & (z < self.LIDAR_ESTOP_Z_MAX)
+        )
+        if not np.any(mask):
+            return False
+        dist = np.sqrt(x[mask] ** 2 + y[mask] ** 2)
+        return float(dist.min()) < self.LIDAR_ESTOP_DISTANCE
+
+    def _damp_robot(self):
+        """Lay the robot down and zero ego-velocity."""
+        if self.simulation_mode:
+            print("StandDown command")
+        else:
+            self.sport_client.StandDown()
+        self.manual_stop = True
+        self.stop_button.config(bg="green", text="Resume")
+        self.social_nav._ego_velocity = [0.0, 0.0, 0.0]
+
+    def _toggle_manual_stop(self):
+        """Toggle manual stop state."""
+        self.manual_stop = not self.manual_stop
+        if self.manual_stop:
+            self.stop_button.config(bg="green", text="Resume")
+            if not self.simulation_mode:
+                self.sport_client.Move(0, 0, 0)
+            print("[STOP] Manual stop activated")
+        else:
+            self.stop_button.config(bg="red", text="Stop")
+            print("[STOP] Manual stop released")
+
     def _control_robot(self):
         """Send Motion Commands to Robot"""
         if hasattr(self, 'motion_vector'):
             v_x, v_y, w_z = [float(val) for val in self.motion_vector]
             if self.simulation_mode:
                 print(f"vx={v_x:.4f}, vy={v_y:.4f}, wz={w_z:.4f}")
+            elif self.manual_stop or self._lidar_too_close():
+                self.sport_client.Move(0, 0, 0)
+                # Tell social nav the robot isn't actually moving
+                self.social_nav._ego_velocity = [0.0, 0.0, 0.0]
+                if not self.manual_stop:
+                    print("[E-STOP] LiDAR proximity halt")
             else:
                 self.sport_client.Move(v_x, v_y, w_z)
 
     def _show_results(self, image):
         """Draw Detection Results and Information on Image"""
-        if self.state["predicted_object"] != "NULL" and self.state["bounding_box"] is not None and self.show_max_result:
-            x1, y1, x2, y2 = self.state["bounding_box"]
+        bbox = self.state["bounding_box"]
+        if self.state["predicted_object"] != "NULL" and bbox is not None and self.show_max_result:
+            x1, y1, x2, y2 = bbox
             confidence = self.state["confidence"][0]
             class_name = self.state["predicted_object"]
             object_cxy = self.state["object_xyn"]
@@ -1932,6 +2025,15 @@ if __name__ == "__main__":
     parser.add_argument('--traj_direct_step', action='store_true', default=False,
                         help='Use direct force displacement (nxt = cur + grad + goal) instead of '
                              'normalized heading+grad+goal * step_size')
+
+    # ── ArUco goal detection ──
+    parser.add_argument('--goal_mode', type=str, default='yolo',
+                        choices=['yolo', 'aruco'],
+                        help='Goal detection method: yolo (default) or aruco markers')
+    parser.add_argument('--aruco_marker_size', type=float, default=0.15,
+                        help='ArUco marker physical size in meters (default 0.10)')
+    parser.add_argument('--aruco_ids', type=str, default='0,1',
+                        help='Comma-separated ArUco marker IDs (default "0,1")')
 
     # ── Environment overrides ──
     parser.add_argument('--robot_speed', type=float, default=None,
