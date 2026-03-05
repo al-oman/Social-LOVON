@@ -146,7 +146,7 @@ class SocialNavigator:
         "lidar_depth_percentile": 50,  # percentile to find nearest returns (seed for cluster)
         "lidar_cluster_margin": 0.5,   # meters — only keep points within this of the nearest seed; rejects wall
         "lidar_kpt_conf_thresh": 0.5,  # min keypoint confidence to use for skeleton matching
-        "lidar_skeleton_dist": 0.005,   # max normalized image distance from skeleton to count as "on person"
+        "lidar_skeleton_dist": 0.02,   # max normalized image distance from skeleton to count as "on person"
         "lidar_holdover_frames": 5,    # keep last valid distance for this many frames when readings drop out
         "lidar_outlier_max_jump": 0.5, # meters; reject single-frame distance jumps larger than this
         # --- BEV minimap display ---
@@ -432,7 +432,6 @@ class SocialNavigator:
         # Keep only points in front after rotation
         front = rx2 > 0
         rx2, ry, rz = rx2[front], ry[front], rz[front]
-        lx, ly, lz = lx[front], ly[front], lz[front]
         if rx2.size == 0:
             return None
 
@@ -448,11 +447,11 @@ class SocialNavigator:
         # Keep only in-frame points
         in_frame = (u_norm >= 0) & (u_norm <= 1) & (v_norm >= 0) & (v_norm <= 1)
         u_norm, v_norm = u_norm[in_frame], v_norm[in_frame]
-        lx, ly, lz = lx[in_frame], ly[in_frame], lz[in_frame]
-        if lx.size == 0:
+        rx2, ry, rz = rx2[in_frame], ry[in_frame], rz[in_frame]
+        if rx2.size == 0:
             return None
 
-        return np.column_stack([u_norm, v_norm, lx, ly, lz])
+        return np.column_stack([u_norm, v_norm, rx2, ry, rz])
 
     # ================================================================== #
     #  STAGE 2 -- Distance estimation + robot-frame projection            #
@@ -520,7 +519,7 @@ class SocialNavigator:
         # torso_pts_n = torso_pts / np.array([img_w,img_h])
         self._human_torso = torso_pts
 
-    def _estimate_distance_lidar(self, det, lidar_ranges):
+    def _estimate_distance_lidar_2(self, det, lidar_ranges):
         # type: (dict, ...) -> Optional[float]
         """Estimate distance using the shared lidar-to-image projection table.
 
@@ -538,7 +537,7 @@ class SocialNavigator:
         if bbox is None:
             return None
 
-        all_pts = self._lidar_image_points  # (N, 5): u_n, v_n, lx, ly, lz
+        all_pts = self._lidar_image_points  # (N, 5): u_n, v_n, rx2, ry, rz (camera-aligned frame)
         z_mask = all_pts[:, 4] >= self.params["human_lidar_z_min"]
         pts = all_pts[z_mask]
         if len(pts) == 0:
@@ -661,6 +660,88 @@ class SocialNavigator:
         self._lidar_human_masks.append(full_mask)
 
         det["_lidar_npts"] = int(np.count_nonzero(cluster_mask))
+        return float(np.median(depths[cluster_mask]))
+
+    def _estimate_distance_lidar(self, det, lidar_ranges):
+        # type: (dict, ...) -> Optional[float]
+        """Estimate distance using the shared lidar-to-image projection table.
+
+        Selects lidar points whose normalised image position is close to the
+        person's skeleton lines (preferred) or inside the bounding box
+        (fallback).  Saves a boolean mask into ``self._lidar_human_masks``
+        so the overlay can colour those points black.
+        """
+        if not self.params["use_lidar_depth"]:
+            return None
+        if self._lidar_image_points is None or len(self._lidar_image_points) == 0:
+            return None
+
+        bbox = det.get("bbox")
+        if bbox is None:
+            return None
+
+        pts = self._lidar_image_points  # (N, 5): u_n, v_n, lx, ly, lz
+        u_n = pts[:, 0]
+        v_n = pts[:, 1]
+        lx  = pts[:, 2]
+
+        img_w = float(self.params["image_width"])
+        img_h = float(self.params["image_height"])
+
+        # --- Try skeleton-based selection ---
+        kpts = det.get("keypoints")
+        kpts_conf = det.get("keypoints_conf")
+        selected = None
+        used_skeleton = False
+
+        if kpts is not None and kpts_conf is not None:
+            kpts = np.asarray(kpts, dtype=np.float64)
+            kpts_conf = np.asarray(kpts_conf, dtype=np.float64)
+            min_conf = self.params["lidar_kpt_conf_thresh"]
+
+            # Normalise keypoints to [0, 1]
+            kpts_n = kpts / np.array([img_w, img_h])
+
+            segments = [(kpts_n[i], kpts_n[j]) for i, j in self._SKELETON
+                        if kpts_conf[i] >= min_conf and kpts_conf[j] >= min_conf]
+
+            if len(segments) >= 3:
+                min_dists = np.full(len(u_n), np.inf)
+                for seg_a, seg_b in segments:
+                    d = self._point_to_segment_dist(
+                        u_n, v_n, seg_a[0], seg_a[1], seg_b[0], seg_b[1])
+                    np.minimum(min_dists, d, out=min_dists)
+
+                thresh = self.params["lidar_skeleton_dist"]
+                selected = min_dists <= thresh
+                if np.count_nonzero(selected) >= self.params["lidar_min_points"]:
+                    used_skeleton = True
+
+        # --- Fallback: normalised bbox ---
+        if not used_skeleton:
+            x1_px, y1_px, x2_px, y2_px = bbox
+            u_min, u_max = x1_px / img_w, x2_px / img_w
+            v_min, v_max = y1_px / img_h, y2_px / img_h
+            selected = ((u_n >= u_min) & (u_n <= u_max)
+                        & (v_n >= v_min) & (v_n <= v_max))
+
+        if np.count_nonzero(selected) < self.params["lidar_min_points"]:
+            return None
+
+        # --- Nearest-cluster ---
+        depths = lx[selected]
+        near_ref = float(np.percentile(depths, self.params["lidar_depth_percentile"]))
+        cluster_margin = self.params["lidar_cluster_margin"]
+        cluster_mask = depths <= near_ref + cluster_margin
+        if np.count_nonzero(cluster_mask) < self.params["lidar_min_points"]:
+            return near_ref
+
+        # Build full mask (into _lidar_image_points) for overlay
+        full_mask = np.zeros(len(pts), dtype=bool)
+        sel_indices = np.where(selected)[0]
+        full_mask[sel_indices[cluster_mask]] = True
+        self._lidar_human_masks.append(full_mask)
+
         return float(np.median(depths[cluster_mask]))
 
     def _estimate_distance_mono(self, det):
