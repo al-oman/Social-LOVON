@@ -47,6 +47,7 @@ class TrackedHuman:
         self.distance_lidar = None       # meters, from lidar
         self.distance_mono = None        # meters, from monocular approx
         self.distance = None             # meters, fused best-estimate
+        self.lidar_npts = 0              # number of LiDAR points used
 
         # --- Robot-frame metric position ---
         self.position_rf = None          # [x_lateral, depth] in meters
@@ -132,17 +133,22 @@ class SocialNavigator:
         "track_low_thresh": 0.1,    # confidence >= this → second association
         "track_iou_thresh": 0.3,    # minimum IoU to accept a match
         "track_max_lost": 30,       # frames before a lost track is removed
+        "track_confirm_frames": 3,  # frames a track must be seen before confirmed as human
+        "goal_confirm_frames": 3,   # frames goal must be seen before accepted
         # --- LiDAR depth estimation ---
         "use_lidar_depth": True,       # True = use LiDAR for depth, False = monocular only
         "lidar_z_min": -0.3,          # meters, min Z in base frame (rejects ground ~-0.5)
         "lidar_z_max": 5.0,           # meters, max Z relative to sensor (above sensor)
+        "human_lidar_z_min": 0.0,
         # "lidar_angle_margin_deg": -5.0, # degrees, angular padding on bbox edges
         "lidar_min_points": 3,         # minimum LiDAR points for valid estimate
-        "lidar_ema_alpha": 0.5,        # EMA smoothing factor (0..1); lower = smoother, higher = more responsive
+        "lidar_ema_alpha": 0.3,        # EMA smoothing factor (0..1); lower = smoother, higher = more responsive
         "lidar_depth_percentile": 50,  # percentile to find nearest returns (seed for cluster)
         "lidar_cluster_margin": 0.5,   # meters — only keep points within this of the nearest seed; rejects wall
         "lidar_kpt_conf_thresh": 0.5,  # min keypoint confidence to use for skeleton matching
-        "lidar_skeleton_dist": 0.05,   # max normalized image distance from skeleton to count as "on person"
+        "lidar_skeleton_dist": 0.005,   # max normalized image distance from skeleton to count as "on person"
+        "lidar_holdover_frames": 5,    # keep last valid distance for this many frames when readings drop out
+        "lidar_outlier_max_jump": 0.5, # meters; reject single-frame distance jumps larger than this
         # --- BEV minimap display ---
         "bev_range_m": 7.0,            # visible forward range in BEV (meters), independent of d_max
         "bev_behind_m": 2.0,           # how many meters behind the robot to show in BEV / heatmap
@@ -187,6 +193,8 @@ class SocialNavigator:
         self._tracked_humans = {}  # type: Dict[int, TrackedHuman]
         self._next_id = 0
         self._byte_tracks = []     # type: List[dict]  # internal ByteTrack state
+        self._human_torso = []
+        self._lidar_pts_in_torso = []
 
         # --- Derive step counts from time-based params ---
         dt = self.params["time_step"]
@@ -226,6 +234,7 @@ class SocialNavigator:
         self._ego_velocity = None          # last executed [v_fwd, v_lat, omega]
         self._goal_rf = None               # [x_lateral, depth] estimated goal position
         self._goal_fresh = False           # True when update_goal() set a fresh detection this frame
+        self._goal_seen_count = 0          # consecutive frames goal has been detected
         self._current_traj = None            # extrapolated robot path
         self._current_traj_score = 0.0     # score of current extrapolated path
         self._current_traj_min_score = 1.0
@@ -488,6 +497,29 @@ class SocialNavigator:
         t = np.clip(((px - ax) * abx + (py - ay) * aby) / ab_sq, 0.0, 1.0)
         return np.hypot(px - (ax + t * abx), py - (ay + t * aby))
 
+    @staticmethod                                                                                                                                                                 
+    def _points_in_quad(px, py, quad):                                                                                                                                            
+        """Test if points (px, py) are inside a convex quadrilateral.                                                                                                             
+        quad: (4, 2) array of vertices in order.
+        Returns boolean array.
+        """
+        inside = np.ones(len(px), dtype=bool)
+        for i in range(4):
+            x1, y1 = quad[i]
+            x2, y2 = quad[(i + 1) % 4]
+            cross = (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+            inside &= (cross >= 0)
+        return inside
+
+    def _get_human_torso_points(self, det):
+        # in counter clockwise order (for cross product purposes)
+        kpts = det["keypoints"]
+        # img_w = float(self.params["image_width"])
+        # img_h = float(self.params["image_height"])
+        torso_pts = [kpts[5], kpts[6], kpts[12], kpts[11]]
+        # torso_pts_n = torso_pts / np.array([img_w,img_h])
+        self._human_torso = torso_pts
+
     def _estimate_distance_lidar(self, det, lidar_ranges):
         # type: (dict, ...) -> Optional[float]
         """Estimate distance using the shared lidar-to-image projection table.
@@ -506,7 +538,11 @@ class SocialNavigator:
         if bbox is None:
             return None
 
-        pts = self._lidar_image_points  # (N, 5): u_n, v_n, lx, ly, lz
+        all_pts = self._lidar_image_points  # (N, 5): u_n, v_n, lx, ly, lz
+        z_mask = all_pts[:, 4] >= self.params["human_lidar_z_min"]
+        pts = all_pts[z_mask]
+        if len(pts) == 0:
+            return None
         u_n = pts[:, 0]
         v_n = pts[:, 1]
         lx  = pts[:, 2]
@@ -514,11 +550,41 @@ class SocialNavigator:
         img_w = float(self.params["image_width"])
         img_h = float(self.params["image_height"])
 
-        # --- Try skeleton-based selection ---
         kpts = det.get("keypoints")
         kpts_conf = det.get("keypoints_conf")
         selected = None
         used_skeleton = False
+        used_torso = False
+
+        # self._get_human_torso_points(det)
+
+        # # try torso based human measuremnt
+        # if kpts is not None and kpts_conf is not None:
+        #     # kpts = np.asarray(kpts, dtype=np.float64)
+        #     # kpts_conf = np.asarray(kpts_conf, dtype=np.float64)
+        #     # min_conf = self.params["lidar_kpt_conf_thresh"]
+        #     torso_pts_n = self._human_torso
+        #     # ls_rs = [torso_pts_n[0], torso_pts_n[1]],
+        #     # lh_rh = [torso_pts_n[2], torso_pts_n[3]],
+        #     # ls_lh = [torso_pts_n[0], torso_pts_n[2]],
+        #     # rs_rh = [torso_pts_n[1], torso_pts_n[3]]
+        #     # torso_lines = [
+        #     #     ls_rs,
+        #     #     lh_rh, 
+        #     #     ls_lh,
+        #     #     rs_rh
+        #     # ]
+        #     quad = np.array(torso_pts_n)[::-1]
+        #     selected = self._points_in_quad(u_n, v_n, quad)
+        #     self._lidar_pts_in_torso = selected
+
+
+        # else:
+        #     print('torso flopped')
+
+
+        # --- Try skeleton-based selection ---
+
 
         if kpts is not None and kpts_conf is not None:
             kpts = np.asarray(kpts, dtype=np.float64)
@@ -539,17 +605,42 @@ class SocialNavigator:
                     np.minimum(min_dists, d, out=min_dists)
 
                 thresh = self.params["lidar_skeleton_dist"]
+                print(f'min skeleton dists: min={min_dists.min():.6f} median={np.median(min_dists):.6f} thresh={self.params["lidar_skeleton_dist"]}')
                 selected = min_dists <= thresh
+                print(f'selected: {np.count_nonzero(selected)} of {len(selected)}')
                 if np.count_nonzero(selected) >= self.params["lidar_min_points"]:
                     used_skeleton = True
+                  # Debug: print coords of selected points vs nearest skeleton segment                                                                                                          
+                if np.any(selected):                                                                                                                                                        
+                    sel_idx = np.where(selected)[0][:3]  # first 3 selected points                                                                                                            
+                    for si in sel_idx:                                                                                                                                                      
+                        best_seg_dist = np.inf
+                        best_seg = None
+                        for seg_a, seg_b in segments:
+                            d = self._point_to_segment_dist(
+                                np.array([u_n[si]]), np.array([v_n[si]]),
+                                seg_a[0], seg_a[1], seg_b[0], seg_b[1])
+                            if d[0] < best_seg_dist:
+                                best_seg_dist = d[0]
+                                best_seg = (seg_a, seg_b)
+                        print(f'  SELECTED pt ({u_n[si]:.4f},{v_n[si]:.4f}) dist={best_seg_dist:.6f} '
+                                f'seg=({best_seg[0][0]:.4f},{best_seg[0][1]:.4f})->({best_seg[1][0]:.4f},{best_seg[1][1]:.4f})')
+                    # Also print a few REJECTED points that are close
+                    rejected = np.where(~selected)[0]
+                    close_rejected = rejected[np.argsort(min_dists[rejected])[:3]]
+                    for ri in close_rejected:
+                        print(f'  REJECTED pt ({u_n[ri]:.4f},{v_n[ri]:.4f}) dist={min_dists[ri]:.6f}')
+
+        else:
+            print('kpts or conf none')
 
         # --- Fallback: normalised bbox ---
-        if not used_skeleton:
-            x1_px, y1_px, x2_px, y2_px = bbox
-            u_min, u_max = x1_px / img_w, x2_px / img_w
-            v_min, v_max = y1_px / img_h, y2_px / img_h
-            selected = ((u_n >= u_min) & (u_n <= u_max)
-                        & (v_n >= v_min) & (v_n <= v_max))
+        # if not used_skeleton:
+        #     x1_px, y1_px, x2_px, y2_px = bbox
+        #     u_min, u_max = x1_px / img_w, x2_px / img_w
+        #     v_min, v_max = y1_px / img_h, y2_px / img_h
+        #     selected = ((u_n >= u_min) & (u_n <= u_max)
+        #                 & (v_n >= v_min) & (v_n <= v_max))
 
         if np.count_nonzero(selected) < self.params["lidar_min_points"]:
             return None
@@ -563,11 +654,13 @@ class SocialNavigator:
             return near_ref
 
         # Build full mask (into _lidar_image_points) for overlay
-        full_mask = np.zeros(len(pts), dtype=bool)
+        z_idx = np.where(z_mask)[0]  # maps filtered index → full index
+        full_mask = np.zeros(len(all_pts), dtype=bool)
         sel_indices = np.where(selected)[0]
-        full_mask[sel_indices[cluster_mask]] = True
+        full_mask[z_idx[sel_indices[cluster_mask]]] = True
         self._lidar_human_masks.append(full_mask)
 
+        det["_lidar_npts"] = int(np.count_nonzero(cluster_mask))
         return float(np.median(depths[cluster_mask]))
 
     def _estimate_distance_mono(self, det):
@@ -686,6 +779,7 @@ class SocialNavigator:
                 "track_id": self._next_id,
                 "state": "active",
                 "frames_lost": 0,
+                "frames_seen": 1,
             }
             self._next_id += 1
             self._apply_detection(new_track, det_data, now)
@@ -702,8 +796,9 @@ class SocialNavigator:
 
         # === Build _tracked_humans from active tracks ===
         self._tracked_humans.clear()
+        confirm = self.params["track_confirm_frames"]
         for track in self._byte_tracks:
-            if track["state"] == "active":
+            if track["state"] == "active" and track.get("frames_seen", 0) >= confirm:
                 tid = track["track_id"]
                 human = TrackedHuman(track_id=tid)
                 human.bbox = track.get("bbox")
@@ -714,6 +809,7 @@ class SocialNavigator:
                 human.distance_lidar = track.get("distance_lidar")
                 human.distance_mono = track.get("distance_mono")
                 human.distance = track.get("distance")
+                human.lidar_npts = track.get("lidar_npts", 0)
                 human.position_rf = track.get("position_rf")
                 human.last_seen = track.get("last_seen", now)
                 self._tracked_humans[tid] = human
@@ -799,15 +895,30 @@ class SocialNavigator:
         track["confidence"] = det.get("confidence", 0.0)
         track["distance_lidar"] = det.get("distance_lidar")
         track["distance_mono"] = det.get("distance_mono")
+        track["lidar_npts"] = det.get("_lidar_npts", 0)
 
-        # EMA smoothing on lidar distance
+        # EMA smoothing on lidar distance with outlier rejection + holdover
         raw_dist = det.get("distance")
         prev_dist = track.get("distance")
+        max_jump = self.params["lidar_outlier_max_jump"]
+        holdover = self.params["lidar_holdover_frames"]
+
         if raw_dist is not None and prev_dist is not None:
-            alpha = self.params["lidar_ema_alpha"]
-            track["distance"] = alpha * raw_dist + (1 - alpha) * prev_dist
-        else:
+            if abs(raw_dist - prev_dist) > max_jump:
+                track.setdefault("_dist_miss_count", 0)
+                track["_dist_miss_count"] += 1
+            else:
+                alpha = self.params["lidar_ema_alpha"]
+                track["distance"] = alpha * raw_dist + (1 - alpha) * prev_dist
+                track["_dist_miss_count"] = 0
+        elif raw_dist is not None:
             track["distance"] = raw_dist
+            track["_dist_miss_count"] = 0
+        else:
+            track.setdefault("_dist_miss_count", 0)
+            track["_dist_miss_count"] += 1
+            if track["_dist_miss_count"] > holdover:
+                track["distance"] = None
 
         # Recompute position_rf from smoothed distance
         if track["distance"] is not None and det.get("center_px") is not None:
@@ -820,6 +931,7 @@ class SocialNavigator:
         track["last_seen"] = timestamp
         track["state"] = "active"
         track["frames_lost"] = 0
+        track["frames_seen"] = track.get("frames_seen", 0) + 1
 
     # ================================================================== #
     #  STAGE 4 -- Trajectory prediction                                 #
@@ -1364,10 +1476,14 @@ class SocialNavigator:
             depth = self.params["mono_k"] / bbox_height_px
         else:
             self._goal_fresh = False
+            self._goal_seen_count = 0
             return  # keep last valid goal — ego-motion will compensate
         u_px = object_xyn[0] * self.params["image_width"]
-        self._goal_rf = [depth * (u_px - self._cx) / self._fx, depth]
-        self._goal_fresh = True  # skip ego-motion compensation this frame
+        candidate = [depth * (u_px - self._cx) / self._fx, depth]
+        self._goal_seen_count += 1
+        if self._goal_seen_count >= self.params["goal_confirm_frames"]:
+            self._goal_rf = candidate
+            self._goal_fresh = True  # skip ego-motion compensation this frame
         # print(self._goal_rf)
 
     def _update_trajectory_data(self):
@@ -1407,6 +1523,10 @@ class SocialNavigator:
             h.distance for h in self._tracked_humans.values()
             if h.distance is not None
         ]
+        lidar_npts = {
+            tid: h.lidar_npts for tid, h in self._tracked_humans.items()
+            if getattr(h, 'lidar_npts', None)
+        }
         self.diag = {
             "num_humans": len(self._tracked_humans),
             "min_distance": min(distances) if distances else None,
@@ -1414,6 +1534,7 @@ class SocialNavigator:
             "shield_active": self.shield_active,
             "traj_score": getattr(self, '_current_traj_score', 0.0),
             "best_traj_score": getattr(self, '_best_traj_score', 0.0),
+            "lidar_npts": lidar_npts,
         }
         if self._tracked_humans:
             logger.info(
@@ -1707,11 +1828,11 @@ class SocialNavigator:
                 _cv2.circle(image, (int(_u), int(_v)), 5,
                             tuple(int(c) for c in _col), -1)
 
-        # Draw human points as small white stars
+        # Draw human points 
         for _u, _v, _h in zip(u, v, is_human):
             if _h:
-                _cv2.drawMarker(image, (int(_u), int(_v)), (255, 255, 255),
-                                _cv2.MARKER_STAR, 8, 1)
+                _cv2.drawMarker(image, (int(_u), int(_v)), (0, 0, 0),
+                                _cv2.MARKER_STAR, 30, 2)
 
         return image
 

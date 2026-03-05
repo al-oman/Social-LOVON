@@ -98,7 +98,7 @@ def main():
     cmd_rate = 0.05      # 20 Hz command loop
 
     MOVE_KEYS = {'w', 'a', 's', 'd', 'q', 'e'}
-    KEY_TIMEOUT = 0.15  # seconds — if no key repeat within this, assume released
+    KEY_TIMEOUT = 0.6   # seconds — covers terminal initial key-repeat delay (~500ms)
 
     old_settings = termios.tcgetattr(sys.stdin)
     try:

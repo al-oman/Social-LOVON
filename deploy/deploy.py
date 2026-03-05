@@ -338,6 +338,7 @@ class HeadlessRunner(CrowdNavPolicyMixin):
         }
         self.pose_state = {"num_people": 0, "poses": [], "pose_boxes": []}
         self.motion_vector = [0.0, 0.0, 0.0]
+        self._success_frame_count = 0
 
         # ── CrowdNav provider ──
         from models.crowdnav_data_provider import CrowdNavDataProvider
@@ -500,11 +501,19 @@ class HeadlessRunner(CrowdNavPolicyMixin):
                 **state,
             }
             prediction = self.motion_predictor.predict(input_data)
-            self.state["mission_state_in"] = prediction["predicted_state"]
             self.state["search_state_in"] = prediction["search_state"]
-            self.motion_vector = prediction["motion_vector"]
-            if self.state["mission_state_in"] == "success":
+
+            if prediction["predicted_state"] == "success":
+                self._success_frame_count += 1
+            else:
+                self._success_frame_count = 0
+
+            if self._success_frame_count >= 3:
+                self.state["mission_state_in"] = "success"
                 self.motion_vector = [0.0, 0.0, 0.0]
+            else:
+                self.state["mission_state_in"] = prediction["predicted_state"]
+                self.motion_vector = prediction["motion_vector"]
 
         bbox = self.state.get("bounding_box")
         bbox_h = (bbox[3] - bbox[1]) if bbox else None
@@ -915,11 +924,14 @@ class MotionControlThread(threading.Thread):
                     if remaining > 0:
                         time.sleep(remaining)
                 else:
-                    state = self.result_queue.get(timeout=1)
+                    try:
+                        state = self.result_queue.get(timeout=0.05)  # 20Hz tick
+                        with self.controller.motion_lock:
+                            self.controller._update_motion_control(state)
+                    except queue.Empty:
+                        pass  # No new detection — keep sending last velocity
                     with self.controller.motion_lock:
-                        self.controller._update_motion_control(state)
                         self.controller._control_robot()
-                    # print(state)
 
                 self.freq_count += 1
                 if time.time() - self.freq_start >= 1:
@@ -930,8 +942,6 @@ class MotionControlThread(threading.Thread):
                     self.freq_start = time.time()
                     self.freq_count = 0
 
-            except queue.Empty:
-                continue
             except Exception as e:
                 import traceback
                 print(f"MotionControl Error: {e}")
@@ -1105,6 +1115,8 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         self.yolo_pose_lock = threading.Lock()
         self.motion_lock = threading.Lock()
         self.freq_lock = threading.Lock()
+        self._lidar_estop_count = 0
+        self._success_frame_count = 0
 
         # Frequency monitoring
         self.image_getter_freq = 0.0
@@ -1124,6 +1136,8 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             self.crowdnav_provider.reset(robot_theta=self.robot_theta)
             self.crowdnav_provider.init_render()
             self.motion_vector = [0.0, 0.0, 0.0]
+            self._lidar_estop_count = 0
+            self._success_frame_count = 0
             self.sim_started = False
             self.sim_paused = False
             self._planned_trajectory_world = None
@@ -1641,11 +1655,19 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                 **state
             }
             prediction = self.motion_predictor.predict(input_data)
-            self.state["mission_state_in"] = prediction["predicted_state"]
             self.state["search_state_in"] = prediction["search_state"]
-            self.motion_vector = prediction["motion_vector"]
-            if self.state["mission_state_in"] == "success":
+
+            if prediction["predicted_state"] == "success":
+                self._success_frame_count += 1
+            else:
+                self._success_frame_count = 0
+
+            if self._success_frame_count >= 3:
+                self.state["mission_state_in"] = "success"
                 self.motion_vector = [0.0, 0.0, 0.0]
+            else:
+                self.state["mission_state_in"] = prediction["predicted_state"]
+                self.motion_vector = prediction["motion_vector"]
 
         if lidar_cloud is None:
             lidar_cloud = self.lidar_getter_thread.get_cloud() if self.lidar_getter_thread else None
@@ -1709,13 +1731,19 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             v_x, v_y, w_z = [float(val) for val in self.motion_vector]
             if self.simulation_mode:
                 print(f"vx={v_x:.4f}, vy={v_y:.4f}, wz={w_z:.4f}")
-            elif self.manual_stop or self._lidar_too_close():
+            elif self.manual_stop:
                 self.sport_client.Move(0, 0, 0)
-                # Tell social nav the robot isn't actually moving
                 self.social_nav._ego_velocity = [0.0, 0.0, 0.0]
-                if not self.manual_stop:
+            elif self._lidar_too_close():
+                self._lidar_estop_count += 1
+                if self._lidar_estop_count >= 3:
+                    self.sport_client.Move(0, 0, 0)
+                    self.social_nav._ego_velocity = [0.0, 0.0, 0.0]
                     print("[E-STOP] LiDAR proximity halt")
+                else:
+                    self.sport_client.Move(v_x, v_y, w_z)
             else:
+                self._lidar_estop_count = 0
                 self.sport_client.Move(v_x, v_y, w_z)
 
     def _show_results(self, image):
@@ -1765,8 +1793,9 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                         if h and h.distance is not None:
                             dist_str = f" {h.distance:.1f}m"
                             if h.position_rf is not None:
-                                dist_str += f"[x_lat, depth]: [{h.position_rf[0]:+.1f}, {h.position_rf[1]:.1f}]"
-                    label = f"Person (confidence, distance): {confidence:.2f}{dist_str}"
+                                dist_str += f" [{h.position_rf[0]:+.1f}, {h.position_rf[1]:.1f}]"
+                            dist_str += f" Npt:{h.lidar_npts}"
+                    label = f"Person: {confidence:.2f}{dist_str}"
 
                     (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                     cv2.rectangle(image, (x1, y1 - text_height - 5), (x1 + text_width, y1), (255, 0, 0), -1)
@@ -1784,6 +1813,33 @@ class VisualLanguageController(CrowdNavPolicyMixin):
                         pt1 = tuple(map(int, keypoints[pt1_idx]))
                         pt2 = tuple(map(int, keypoints[pt2_idx]))
                         cv2.line(image, pt1, pt2, (0, 255, 0), 2)
+
+        # =========DRAW POINTS USED FOR HUMAN DISTANCE MEASUREMENT======
+        # only writing this for 1 person right now!
+        # if self.pose_state["num_people"] > 0:
+        #     torso_pts = self.social_nav._human_torso
+        #     ls_rs = [torso_pts[0], torso_pts[1]]
+        #     rs_rh = [torso_pts[1], torso_pts[3]]
+        #     rh_lh = [torso_pts[3], torso_pts[2]]
+        #     lh_ls = [torso_pts[2], torso_pts[0]]
+
+        #     torso_lines = [
+        #         ls_rs,
+        #         rs_rh, 
+        #         rh_lh,
+        #         lh_ls
+        #     ]
+        #     for line in torso_lines:
+        #         cv2.line(image,
+        #                  (int(line[0][0]), int(line[0][1])), 
+        #                  (int(line[1][0]), int(line[1][1])), 
+        #                  (0, 0, 0), 4) 
+        # human_pts = self.social_nav._lidar_pts_in_torso
+        # if human_pts is not None:
+        #     for pt in human_pts:
+        #         # cv2.circle(image, (int(pt[0]), int(pt[1])), 5, (0,0,0), -1)
+        #         cv2.drawMarker(image, (int(pt[0]), int(pt[1])), (0, 0, 0), cv2.MARKER_STAR, 16, 2)
+
 
         texts = [
             f"Mission Instruction 1: {self.mission_instruction_1}",
@@ -1826,6 +1882,9 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             safety_texts.append(f"number of humans: {n_humans}")
             safety_texts.append(f"safety score: {safety_score:.2f}")
             safety_texts.append(f"shield active: {sheild_active}")
+            lidar_npts = self.social_nav.diag.get("lidar_npts", {})
+            total_npts = sum(lidar_npts.values()) if lidar_npts else 0
+            safety_texts.append(f"lidar pts: {total_npts}")
 
         traj_score = self.social_nav.diag["traj_score"]
         safety_texts.append(f"traj score: {traj_score:.2f}")
