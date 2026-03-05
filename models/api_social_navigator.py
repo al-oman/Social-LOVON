@@ -117,7 +117,7 @@ class SocialNavigator:
         "fov_deg": 80.0,
         "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
         # --- Human Trajectory prediction ---
-        "human_pred_history_s": 2.0,
+        "human_pred_history_s": 3.0,
         "human_pred_s": 4.0,
         "human_pred_subsample_s": 0.5,  # seconds between output prediction points
         "human_pred_points": 0,         # if nonzero, overrides computed point count directly
@@ -688,64 +688,126 @@ class SocialNavigator:
         img_w = float(self.params["image_width"])
         img_h = float(self.params["image_height"])
 
-        # --- Try skeleton-based selection ---
+        # # --- Skeleton-based selection (disabled) ---
+        # kpts = det.get("keypoints")
+        # kpts_conf = det.get("keypoints_conf")
+        # selected = None
+        # used_skeleton = False
+        #
+        # if kpts is not None and kpts_conf is not None:
+        #     kpts = np.asarray(kpts, dtype=np.float64)
+        #     kpts_conf = np.asarray(kpts_conf, dtype=np.float64)
+        #     min_conf = self.params["lidar_kpt_conf_thresh"]
+        #
+        #     # Normalise keypoints to [0, 1]
+        #     kpts_n = kpts / np.array([img_w, img_h])
+        #
+        #     segments = [(kpts_n[i], kpts_n[j]) for i, j in self._SKELETON
+        #                 if kpts_conf[i] >= min_conf and kpts_conf[j] >= min_conf]
+        #
+        #     if len(segments) >= 3:
+        #         min_dists = np.full(len(u_n), np.inf)
+        #         for seg_a, seg_b in segments:
+        #             d = self._point_to_segment_dist(
+        #                 u_n, v_n, seg_a[0], seg_a[1], seg_b[0], seg_b[1])
+        #             np.minimum(min_dists, d, out=min_dists)
+        #
+        #         thresh = self.params["lidar_skeleton_dist"]
+        #         selected = min_dists <= thresh
+        #         if np.count_nonzero(selected) >= self.params["lidar_min_points"]:
+        #             used_skeleton = True
+        #
+        # if not used_skeleton:
+        #     logger.debug("wireframe distance method not used")
+
+        # --- Bounding box selection (all points inside bbox) ---
+        x1_px, y1_px, x2_px, y2_px = bbox
+        delta_x = x2_px - x1_px
+        delta_y = y2_px - y1_px
+        x1_px += 0.2*delta_x #
+        x2_px -= 0.2*delta_x #
+        y1_px += 0.0*delta_y #
+        y2_px -= 0.2*delta_y #
+
+
+        u_min, u_max = x1_px / img_w, x2_px / img_w
+        v_min, v_max = y1_px / img_h, y2_px / img_h
+        selected = ((u_n >= u_min) & (u_n <= u_max)
+                    & (v_n >= v_min) & (v_n <= v_max))
+
+        if np.count_nonzero(selected) < self.params["lidar_min_points"]:
+            return None
+
+        # --- Refine: keep only bbox points within 20% bbox width of skeleton ---
         kpts = det.get("keypoints")
         kpts_conf = det.get("keypoints_conf")
-        selected = None
-        used_skeleton = False
-
         if kpts is not None and kpts_conf is not None:
             kpts = np.asarray(kpts, dtype=np.float64)
             kpts_conf = np.asarray(kpts_conf, dtype=np.float64)
             min_conf = self.params["lidar_kpt_conf_thresh"]
-
-            # Normalise keypoints to [0, 1]
             kpts_n = kpts / np.array([img_w, img_h])
 
             segments = [(kpts_n[i], kpts_n[j]) for i, j in self._SKELETON
                         if kpts_conf[i] >= min_conf and kpts_conf[j] >= min_conf]
 
             if len(segments) >= 3:
-                min_dists = np.full(len(u_n), np.inf)
+                bbox_width_n = (x2_px - x1_px) / img_w
+                skel_thresh = 0.2 * bbox_width_n
+
+                # Compute min distance to skeleton for bbox-selected points only
+                sel_idx = np.where(selected)[0]
+                sel_u = u_n[sel_idx]
+                sel_v = v_n[sel_idx]
+                min_dists = np.full(len(sel_u), np.inf)
                 for seg_a, seg_b in segments:
                     d = self._point_to_segment_dist(
-                        u_n, v_n, seg_a[0], seg_a[1], seg_b[0], seg_b[1])
+                        sel_u, sel_v, seg_a[0], seg_a[1], seg_b[0], seg_b[1])
                     np.minimum(min_dists, d, out=min_dists)
 
-                thresh = self.params["lidar_skeleton_dist"]
-                selected = min_dists <= thresh
-                if np.count_nonzero(selected) >= self.params["lidar_min_points"]:
-                    used_skeleton = True
-            
-        if not used_skeleton:
-            logger.debug("wireframe distance method not used")
-
-        # --- Fallback: normalised bbox ---
-        if not used_skeleton:
-            x1_px, y1_px, x2_px, y2_px = bbox
-            u_min, u_max = x1_px / img_w, x2_px / img_w
-            v_min, v_max = y1_px / img_h, y2_px / img_h
-            selected = ((u_n >= u_min) & (u_n <= u_max)
-                        & (v_n >= v_min) & (v_n <= v_max))
+                near_skel = min_dists <= skel_thresh
+                # Update selected: only keep bbox points that are also near skeleton
+                refined_idx = sel_idx[near_skel]
+                selected = np.zeros(len(pts), dtype=bool)
+                selected[refined_idx] = True
 
         if np.count_nonzero(selected) < self.params["lidar_min_points"]:
             return None
 
-        # --- Nearest-cluster ---
-        depths = lx[selected]
-        near_ref = float(np.percentile(depths, self.params["lidar_depth_percentile"]))
-        cluster_margin = self.params["lidar_cluster_margin"]
-        cluster_mask = depths <= near_ref + cluster_margin
-        if np.count_nonzero(cluster_mask) < self.params["lidar_min_points"]:
-            return near_ref
+        # --- Keep nearest 50% of points ---
+        sel_idx = np.where(selected)[0]
+        sel_depths = lx[sel_idx]
+        median_depth = np.median(sel_depths)
+        nearest_half = sel_depths <= median_depth
+        sel_idx = sel_idx[nearest_half]
+        selected = np.zeros(len(pts), dtype=bool)
+        selected[sel_idx] = True
+
+        if np.count_nonzero(selected) < self.params["lidar_min_points"]:
+            return None
 
         # Build full mask (into _lidar_image_points) for overlay
         full_mask = np.zeros(len(pts), dtype=bool)
-        sel_indices = np.where(selected)[0]
-        full_mask[sel_indices[cluster_mask]] = True
+        full_mask[selected] = True
         self._lidar_human_masks.append(full_mask)
 
-        return float(np.median(depths[cluster_mask]))
+        depths = lx[selected]
+        det["_lidar_npts"] = int(np.count_nonzero(selected))
+        print(f'[LIDAR-DBG] bbox pts={np.count_nonzero(selected)} depths: min={depths.min():.2f} max={depths.max():.2f} median={np.median(depths):.2f} std={depths.std():.2f}')
+        return float(np.median(depths))
+
+        # # --- Nearest-cluster (disabled) ---
+        # near_ref = float(np.percentile(depths, self.params["lidar_depth_percentile"]))
+        # cluster_margin = self.params["lidar_cluster_margin"]
+        # cluster_mask = depths <= near_ref + cluster_margin
+        # if np.count_nonzero(cluster_mask) < self.params["lidar_min_points"]:
+        #     return near_ref
+        #
+        # full_mask = np.zeros(len(pts), dtype=bool)
+        # sel_indices = np.where(selected)[0]
+        # full_mask[sel_indices[cluster_mask]] = True
+        # self._lidar_human_masks.append(full_mask)
+        #
+        # return float(np.median(depths[cluster_mask]))
 
     def _estimate_distance_mono(self, det):
         # type: (dict) -> Optional[float]
@@ -1611,6 +1673,10 @@ class SocialNavigator:
             tid: h.lidar_npts for tid, h in self._tracked_humans.items()
             if getattr(h, 'lidar_npts', None)
         }
+        history_lengths = [
+            len(self._predictor.agent_trajectories.get(h.track_id, []))
+            for h in self._tracked_humans.values()
+        ]
         self.diag = {
             "num_humans": len(self._tracked_humans),
             "min_distance": min(distances) if distances else None,
@@ -1619,6 +1685,12 @@ class SocialNavigator:
             "traj_score": getattr(self, '_current_traj_score', 0.0),
             "best_traj_score": getattr(self, '_best_traj_score', 0.0),
             "lidar_npts": lidar_npts,
+            "min_hist_len": min(history_lengths) if history_lengths else 0,
+            "min_pred_len": min(
+                (len(h.predicted_path) for h in self._tracked_humans.values()
+                 if h.predicted_path),
+                default=0,
+            ),
         }
         if self._tracked_humans:
             logger.info(

@@ -102,7 +102,8 @@ class HumanTrajectoryPredictor:
         timesteps = [entry['timestep'] for entry in trajectory]
 
         speed = self._estimate_speed(trajectory)
-        n_steps = self._speed_scaled_steps(speed)
+        # n_steps = self._speed_scaled_steps(speed)
+        n_steps = self.prediction_steps
 
         # Stationary check — all positions identical
         unique = set(tuple(p) for p in positions)

@@ -48,6 +48,9 @@ _freq_count = 0
 
 ACCUMULATE_N = 10  # number of recent scans to merge for persistence
 _cloud_buffer = deque(maxlen=ACCUMULATE_N)
+_refresh_scan_count = 0
+_refresh_last_time = None
+full_refresh_dt = 0.0  # seconds for the buffer to fully rotate (last N scans)
 
 
 def _count_filtered(cloud):
@@ -68,6 +71,7 @@ def _count_filtered(cloud):
 def on_pointcloud(msg: PointCloud2_):
     global latest_cloud, cloud_count, cloud_freq, _freq_start, _freq_count
     global scan_total, scan_filtered
+    global _refresh_scan_count, _refresh_last_time, full_refresh_dt
     try:
         cloud = pointcloud2_to_array(msg)
 
@@ -84,6 +88,15 @@ def on_pointcloud(msg: PointCloud2_):
             latest_cloud = {k: np.concatenate([c[k] for c in _cloud_buffer])
                             for k in keys}
             cloud_count = len(next(iter(latest_cloud.values())))
+
+        # Track full buffer refresh time (every ACCUMULATE_N scans)
+        _refresh_scan_count += 1
+        if _refresh_scan_count >= ACCUMULATE_N:
+            now_r = time.time()
+            if _refresh_last_time is not None:
+                full_refresh_dt = now_r - _refresh_last_time
+            _refresh_last_time = now_r
+            _refresh_scan_count = 0
 
         _freq_count += 1
         now = time.time()

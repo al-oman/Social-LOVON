@@ -640,7 +640,7 @@ class LiDARGetterThread(threading.Thread):
     returns a denser merged point cloud instead of a single sparse frame.
     """
 
-    ACCUMULATE_N = 10  # number of recent scans to merge
+    ACCUMULATE_N = 5  # number of recent scans to merge
 
     def __init__(self, controller):
         super().__init__()
@@ -657,6 +657,10 @@ class LiDARGetterThread(threading.Thread):
         self._gap_max = 0.0
         self._parse_total = 0.0
         self._parse_count = 0
+        # full refresh timing
+        self._refresh_scan_count = 0
+        self._refresh_last_time = None
+        self.full_refresh_dt = 0.0
 
     def run(self):
         self._sub = ChannelSubscriber('rt/utlidar/cloud_base', PointCloud2_)
@@ -683,6 +687,14 @@ class LiDARGetterThread(threading.Thread):
                 self.latest_cloud = cloud
                 self._cloud_buffer.append(cloud)
 
+            # Track full buffer refresh time
+            self._refresh_scan_count += 1
+            if self._refresh_scan_count >= self.ACCUMULATE_N:
+                if self._refresh_last_time is not None:
+                    self.full_refresh_dt = now - self._refresh_last_time
+                self._refresh_last_time = now
+                self._refresh_scan_count = 0
+
             self.freq_count += 1
             if now - self.freq_start >= 1.0:
                 freq = self.freq_count / (now - self.freq_start)
@@ -692,7 +704,8 @@ class LiDARGetterThread(threading.Thread):
                 accum_pts = sum(len(next(iter(c.values()))) for c in self._cloud_buffer)
                 diag = (f"[LiDARGetter] {freq:.1f} Hz | {n_pts} pts/scan | "
                         f"accum={accum_pts} pts ({len(self._cloud_buffer)} scans) | "
-                        f"parse={avg_parse:.1f}ms | gap_max={self._gap_max*1000:.0f}ms")
+                        f"parse={avg_parse:.1f}ms | gap_max={self._gap_max*1000:.0f}ms | "
+                        f"full_refresh={self.full_refresh_dt*1000:.0f}ms")
                 for k, v in cloud.items():
                     if len(v) > 0:
                         diag += f" | {k}:[{v.min():.2f}, {v.max():.2f}]"
@@ -710,6 +723,10 @@ class LiDARGetterThread(threading.Thread):
                 self._gap_max = 0.0
                 self._parse_total = 0.0
                 self._parse_count = 0
+
+            from tools.lidar import full_refresh_dt                                       
+            print(f"Full lidar refresh: {full_refresh_dt:.3f}s") 
+            
         except Exception as e:
             print(f"LiDARGetter Error: {e}")
 
@@ -1524,13 +1541,23 @@ class VisualLanguageController(CrowdNavPolicyMixin):
         """Process YOLO Detection Results"""
         if not hasattr(self, '_wcheck'):
             self._wcheck = True
-            w = original_image.shape[1]
+            h, w = original_image.shape[:2]
             if w != self.social_nav.params["image_width"]:
                 print(f"[SocialNav] auto-correcting image_width: {self.social_nav.params['image_width']} -> {w}")
                 self.social_nav.params["image_width"] = w
                 half_fov = np.radians(self.social_nav.params["fov_deg"] / 2.0)
                 self.social_nav._fx = (w / 2.0) / np.tan(half_fov)
                 self.social_nav._cx = w / 2.0
+            if h != self.social_nav.params["image_height"]:
+                print(f"[SocialNav] auto-correcting image_height:{self.social_nav.params['image_height']} -> {h}")
+                self.social_nav.params["image_height"] = h
+                half_fov_v = np.radians(self.social_nav.params["fov_v_deg"] / 2.0)
+                self.social_nav._fy = (h / 2.0) / np.tan(half_fov_v)
+                self.social_nav._cy = h / 2.0
+
+
+
+
         detections = []
         for result in results:
             for box in result.boxes:
@@ -1877,6 +1904,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             n_humans = self.social_nav.diag["num_humans"]
             safety_score = self.social_nav.safety_score
             sheild_active = self.social_nav.shield_active
+            min_hist = self.social_nav.diag.get("min_hist_len", 0)
 
             safety_texts.append(f"minimum distance: {min_d:.2f} m" if min_d is not None else "minimum distance: n/a")
             safety_texts.append(f"number of humans: {n_humans}")
@@ -1884,7 +1912,10 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             safety_texts.append(f"shield active: {sheild_active}")
             lidar_npts = self.social_nav.diag.get("lidar_npts", {})
             total_npts = sum(lidar_npts.values()) if lidar_npts else 0
-            safety_texts.append(f"lidar pts: {total_npts}")
+            safety_texts.append(f"lidar measurement pts: {total_npts}")
+            safety_texts.append(f"min pred history: {min_hist}")
+            min_pred = self.social_nav.diag.get("min_pred_len", 0)
+            safety_texts.append(f"min pred future: {min_pred}")
 
         traj_score = self.social_nav.diag["traj_score"]
         safety_texts.append(f"traj score: {traj_score:.2f}")
