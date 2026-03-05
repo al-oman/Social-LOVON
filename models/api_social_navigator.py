@@ -1173,6 +1173,17 @@ class SocialNavigator:
                             (p1[0] - p0[0]) / dt,
                             (p1[1] - p0[1]) / dt,
                         ]
+                # Estimate velocity from full history
+                # traj = self._predictor.agent_trajectories.get(human.track_id)
+                # if traj and len(traj) >= 2:
+                #     p_first = traj[0]['position']
+                #     p_last = traj[-1]['position']
+                #     dt = traj[-1]['timestep'] - traj[0]['timestep']
+                #     if dt > 0:
+                #         human.velocity = [
+                #             (p_last[0] - p_first[0]) / dt,
+                #             (p_last[1] - p_first[1]) / dt,
+                #         ]
             else:
                 human.predicted_path = None
                 human.velocity = None
@@ -1237,15 +1248,25 @@ class SocialNavigator:
             ghost.position_rf = ghost_pos
             ghost.distance = math.hypot(ghost_pos[0], ghost_pos[1])
             ghost.predicted_path = pred[pred_idx:]  # remaining predicted path
-            # Estimate velocity from predictor history
+            # # Estimate velocity from predictor history (last two points)
+            # if len(traj) >= 2:
+            #     p0 = traj[-2]['position']
+            #     p1 = traj[-1]['position']
+            #     dt = traj[-1]['timestep'] - traj[-2]['timestep']
+            #     if dt > 0:
+            #         ghost.velocity = [
+            #             (p1[0] - p0[0]) / dt,
+            #             (p1[1] - p0[1]) / dt,
+            #         ]
+            # Estimate velocity from full history
             if len(traj) >= 2:
-                p0 = traj[-2]['position']
-                p1 = traj[-1]['position']
-                dt = traj[-1]['timestep'] - traj[-2]['timestep']
+                p_first = traj[0]['position']
+                p_last = traj[-1]['position']
+                dt = traj[-1]['timestep'] - traj[0]['timestep']
                 if dt > 0:
                     ghost.velocity = [
-                        (p1[0] - p0[0]) / dt,
-                        (p1[1] - p0[1]) / dt,
+                        (p_last[0] - p_first[0]) / dt,
+                        (p_last[1] - p_first[1]) / dt,
                     ]
             self._tracked_humans[agent_id] = ghost
 
