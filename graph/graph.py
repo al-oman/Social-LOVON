@@ -6,6 +6,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from models.safety import compute_safety_grid
 
+# ── Trajectory mode ────────────────────────────────────────────────────────────
+LINEAR           = True  # True = straight line; False = circular arc
+
 # ── Arc (fake human trajectory) ────────────────────────────────────────────────
 ARC_RADIUS       = 3.0    # radius of the circular arc (metres)
 ARC_SPAN_DEG     = 60.0   # total angular span of the arc (degrees)
@@ -15,6 +18,11 @@ PAD_LEFT         = 4    # padding around arc extents (metres)
 PAD_RIGHT        = 3.5
 PAD_BOTTOM       = 3
 PAD_TOP          = 4
+
+# ── Linear trajectory (used when LINEAR = True) ─────────────────────────────────
+LINE_START       = (0.0, 0.0)   # (x, y) start point in metres
+LINE_ANGLE_DEG   = 45.0         # direction of travel in degrees (0=+x, 90=+y)
+LINE_LENGTH      = 5.0          # total length of the line (metres)
 
 # ── Safety field parameters (passed directly to safety.py) ─────────────────────
 SIGMA            = 0.75   # Gaussian width at current position (m)
@@ -56,8 +64,20 @@ def make_arc(radius, span_deg, n):
     return x, y
 
 
+def make_line(start, angle_deg, length, n):
+    """Straight line from start in the given direction."""
+    angle = np.radians(angle_deg)
+    t = np.linspace(0, length, n)
+    x = start[0] + t * np.cos(angle)
+    y = start[1] + t * np.sin(angle)
+    return x, y
+
+
 def main():
-    arc_x, arc_y = make_arc(ARC_RADIUS, ARC_SPAN_DEG, N_POINTS)
+    if LINEAR:
+        arc_x, arc_y = make_line(LINE_START, LINE_ANGLE_DEG, LINE_LENGTH, N_POINTS)
+    else:
+        arc_x, arc_y = make_arc(ARC_RADIUS, ARC_SPAN_DEG, N_POINTS)
 
     human_positions = [[arc_x[0], arc_y[0]]]
     human_predicted_paths = {0: [[arc_x[i], arc_y[i]] for i in range(1, N_POINTS)]}
