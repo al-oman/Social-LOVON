@@ -724,8 +724,8 @@ class LiDARGetterThread(threading.Thread):
                 self._parse_total = 0.0
                 self._parse_count = 0
 
-            from tools.lidar import full_refresh_dt                                       
-            print(f"Full lidar refresh: {full_refresh_dt:.3f}s") 
+            # from tools.lidar import full_refresh_dt                                       
+            # print(f"Full lidar refresh: {full_refresh_dt:.3f}s") 
             
         except Exception as e:
             print(f"LiDARGetter Error: {e}")
