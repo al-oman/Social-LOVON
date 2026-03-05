@@ -154,7 +154,7 @@ class SocialNavigator:
         "bev_behind_m": 2.0,           # how many meters behind the robot to show in BEV / heatmap
         "safety_heatmap_num_grid": 50,
         # --- Ego-motion compensation ---
-        "time_step": 0.25,            # seconds per control cycle (for ego-motion compensation)
+        "time_step": 0.1,            # seconds per control cycle (for ego-motion compensation)
         # --- LiDAR-camera overlay calibration ---
         "lidar_cam_yaw_offset": -0.0,   # degrees, horizontal rotation offset
         "lidar_cam_pitch_offset": 1.0, # degrees, vertical rotation offset
@@ -716,6 +716,9 @@ class SocialNavigator:
                 selected = min_dists <= thresh
                 if np.count_nonzero(selected) >= self.params["lidar_min_points"]:
                     used_skeleton = True
+            
+        if not used_skeleton:
+            logger.debug("wireframe distance method not used")
 
         # --- Fallback: normalised bbox ---
         if not used_skeleton:
