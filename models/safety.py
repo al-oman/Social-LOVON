@@ -29,10 +29,10 @@ import numpy as np
 # ------------------------------------------------------------------
 #  Safety parameter defaults
 # ------------------------------------------------------------------
-SIGMA = 0.75          # Gaussian width at current position (meters)
+SIGMA = 1.0          # Gaussian width at current position (meters)
 H = 1.0              # peak danger at distance=0
 GAMMA = 1.01         # trajectory H multiplier per step
-SIGMA_SPREAD = 0.1   # sigma growth per prediction step (meters/step)
+SIGMA_SPREAD = 0.3   # sigma growth per prediction step (meters/step)
 H_TRAJ_SCALE = 1.00        # per-step H multiplier along trajectory (<1 shrinks, >1 grows)
 
 
@@ -106,7 +106,7 @@ def _trajectory_grid(X, Y, human_predicted_paths,
                 d_perp = dx * (-ty) + dy * tx
 
                 sigma_along = sigma
-                sigma_perp = sigma + sigma_spread * (t + 1)
+                sigma_perp = sigma + sigma_spread * t
 
                 inv_along = 1.0 / (2.0 * sigma_along * sigma_along)
                 inv_perp = 1.0 / (2.0 * sigma_perp * sigma_perp)

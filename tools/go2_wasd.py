@@ -92,7 +92,7 @@ def main():
     print("\n Robot interface initialized!")
     print_help()
 
-    linear_speed = 0.3   # m/s
+    linear_speed = 0.7   # m/s
     strafe_speed = 0.3   # m/s
     angular_speed = 1.0  # rad/s
     cmd_rate = 0.05      # 20 Hz command loop

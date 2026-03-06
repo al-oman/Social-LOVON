@@ -118,9 +118,9 @@ class SocialNavigator:
         "fov_v_deg": 45.0,            # vertical FOV (set independently if lens stretch differs)
         # --- Human Trajectory prediction ---
         "human_pred_history_s": 3.0,
-        "human_pred_s": 4.0,
+        "human_pred_s": 6.0,
         "human_pred_subsample_s": 0.5,  # seconds between output prediction points
-        "human_pred_points": 0,         # if nonzero, overrides computed point count directly
+        "human_pred_points": 40,         # if nonzero, overrides computed point count directly
         "pred_interval_s": 0.0,         # 0 = every frame
         # --- Safety Gaussian shape ---
         "safety_sigma": _DEF_SIGMA,               # Gaussian width at current position (m)
@@ -165,6 +165,7 @@ class SocialNavigator:
         # --- Debug / visualisation ---
         "show_bezier_pts": False,     # draw Bezier control points on BEV
         "human_traj_pred": True,      # use predicted human trajectories in safety scoring
+        "position_ema_alpha": 1.0,    # EMA smoothing on position before prediction (1.0 = no smoothing)
     }
 
     def __init__(self, enabled=False, **kwargs):
@@ -195,6 +196,7 @@ class SocialNavigator:
         self._byte_tracks = []     # type: List[dict]  # internal ByteTrack state
         self._human_torso = []
         self._lidar_pts_in_torso = []
+        self._smoothed_positions = {}  # {track_id: [x, y]} for EMA smoothing
 
         # --- Derive step counts from time-based params ---
         dt = self.params["time_step"]
@@ -204,13 +206,17 @@ class SocialNavigator:
 
         # --- Trajectory predictor ---
         subsample_s = self.params["human_pred_subsample_s"]
-        stride = max(1, round(subsample_s / dt))
+        # stride = max(1, round(subsample_s / dt))
+        stride = 10
+        print(stride)
         pred_steps = self.params["human_pred_points"] or max(1, int(round(self.params["human_pred_s"] / subsample_s)))
+        print(pred_steps)
         self._predictor = HumanTrajectoryPredictor(
             history_length=self._pred_history_steps,
             prediction_steps=pred_steps,
             prediction_interval=self._pred_interval,
             step_stride=stride,
+            speed_min=0.05
         )
         self._frame_count = 0
 
@@ -1145,12 +1151,22 @@ class SocialNavigator:
         # Transform stored history from previous robot frame to current
         self._compensate_ego_motion()
 
-        # Feed current observations into predictor
+        # Feed current observations into predictor (with optional EMA smoothing)
+        alpha = self.params["position_ema_alpha"]
         for human in self._tracked_humans.values():
             if human.position_rf is not None:
+                pos = human.position_rf
+                if alpha < 1.0:
+                    prev = self._smoothed_positions.get(human.track_id)
+                    if prev is not None:
+                        pos = [
+                            alpha * pos[0] + (1 - alpha) * prev[0],
+                            alpha * pos[1] + (1 - alpha) * prev[1],
+                        ]
+                    self._smoothed_positions[human.track_id] = list(pos)
                 self._predictor.update_agent_position(
                     human.track_id,
-                    human.position_rf,       # [x_lateral, depth] in meters
+                    pos,
                     self._frame_count,
                 )
 

@@ -15,7 +15,7 @@ class HumanTrajectoryPredictor:
     """
 
     def __init__(self, history_length=5, prediction_steps=10, prediction_interval=1, step_stride=1,
-                 dt=0.25, speed_min=0.05, speed_max=1.0):
+                 dt=0.25, speed_min=0.15, speed_max=1.0):
         """
         Args:
             history_length:      Number of past positions to retain per human.
@@ -102,8 +102,8 @@ class HumanTrajectoryPredictor:
         timesteps = [entry['timestep'] for entry in trajectory]
 
         speed = self._estimate_speed(trajectory)
-        # n_steps = self._speed_scaled_steps(speed)
-        n_steps = self.prediction_steps
+        n_steps = self._speed_scaled_steps(speed)
+        # n_steps = self.prediction_steps
 
         # Stationary check — all positions identical
         unique = set(tuple(p) for p in positions)

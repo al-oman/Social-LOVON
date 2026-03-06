@@ -1181,7 +1181,7 @@ class VisualLanguageController(CrowdNavPolicyMixin):
             self.lidar_getter_thread = None
 
         # LiDAR proximity e-stop constants
-        self.LIDAR_ESTOP_DISTANCE = 0.35  # metres
+        self.LIDAR_ESTOP_DISTANCE = 0.20  # metres
         self.LIDAR_ESTOP_Z_MIN = -0.2
         self.LIDAR_ESTOP_Z_MAX = 0.8
 
